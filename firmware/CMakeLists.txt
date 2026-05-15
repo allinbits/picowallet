@@ -52,6 +52,7 @@ add_executable(picowallet
     # Validator apps (one per chain family)
     src/apps/cosmos/app.c
     src/apps/cosmos/privval.c
+    src/apps/cosmos/secret_connection_cosmos.c
     src/apps/gnoland/app.c
     src/apps/gnoland/secret_connection_gno.c
     src/apps/gnoland/sc_driver.c
