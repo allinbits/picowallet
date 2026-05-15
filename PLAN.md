@@ -195,15 +195,19 @@ Phase ✓ = completed (verified end-to-end). Phase ◯ = open.
   failure mode for hours of debugging — documented in memory)
 - 1 kHz USB pump timer so descriptor enumeration survives slow display init
 
-### ✓ M4 — Cosmos privval (plaintext, no SecretConnection)
+### ✓ M4 — Cosmos privval (now sealed; plaintext path removed)
 
-- TCP listener on port 26658
 - Privval wire framing (uvarint length + length-delimited protobuf)
 - Handlers: `PubKeyRequest`, `SignVoteRequest`, `SignProposalRequest`,
   `PingRequest`
 - Canonical-vote / proposal encoder (sfixed64 for height/round)
 - HWM enforcement + flash persistence
-- Host-side bench: 1000 sign-votes at ~57 signs/sec, p50 16 ms
+- Originally exposed via a plaintext TCP listener on port 26658, with a
+  bench of 1000 sign-votes at ~57 signs/sec (p50 16 ms). Cometbft only
+  speaks SecretConnection over TCP, so the plaintext listener could only
+  ever serve dev tooling and has been removed. Privval is now driven by
+  the cosmos SC channel via a sink callback (see M6); through SC the
+  100-sign bench reports ~31 signs/sec, p50 18 ms.
 
 ### ✓ M5a — Gno.land SecretConnection + privval
 
@@ -258,17 +262,24 @@ Subtasks:
   validated bit-for-bit against curve25519-voi `TestSimpleTranscript`
   (`d5a21972d0d5fe32...`) and `TestComplexTranscript`
   (`a8c933f54fae76e3...`) via `make test-merlin`
-- ◯ Add `apps/cosmos/secret_connection_cosmos.{h,c}` — handshake state
-  machine analogous to gno's, but using Merlin for challenge derivation
-  and protobuf-delimited wire framing for the ephemeral / auth-sig
-  messages (`gogotypes.BytesValue`, `tmp2p.AuthSigMessage` with pubkey
-  oneof).
-- ◯ Add `apps/cosmos/sc_driver_cosmos.{h,c}` — TCP driver listening on a
-  third port (26660 suggested), reusing the shared `secret_connection.c`
-  frame layer (AEAD + HKDF key derivation are identical).
-- ◯ Extend `tools/pwctl.py` with `cosmos-sc-handshake` subcommand —
-  Python port of Merlin + protobuf-delimited wire so we can validate
-  end-to-end without spinning up a real cometbft validator.
+- ✓ Add `apps/cosmos/secret_connection_cosmos.{h,c}` — handshake state
+  machine with Merlin challenge derivation + protobuf-delimited wire
+  (ephemeral via `BytesValue`, auth-sig via `AuthSigMessage` with pubkey
+  oneof). Outer wire: 35B ephemeral + 103B AuthSigMessage.
+- ✓ Add `apps/cosmos/sc_driver_cosmos.{h,c}` — TCP listener on port 26660;
+  shared `secret_connection.c` frame layer (AEAD + HKDF identical to gno).
+  Auth-keys allowlist check applies (same OS-level pinning as gno).
+- ✓ Pure-Python Merlin in `tools/merlin.py`, byte-for-byte matched to the
+  C implementation (same test vectors pass both sides).
+- ✓ `pwctl.py cosmos-sc-handshake` — full handshake driver using the Python
+  Merlin + protobuf-delimited wire. Awaiting device flash for integration
+  verification.
+- ✓ Wire the existing protobuf privval state machine through the encrypted
+  frame layer. `apps/cosmos/privval.c` was refactored to take a `privval_sink_t`
+  (write/flush callback) instead of a `tcp_pcb` directly; `sc_driver_cosmos.c`
+  buffers each response frame then seals it. Plaintext listener on 26658
+  removed in the same commit. pwctl pubkey/sign-vote/sign-proposal/replay/bench
+  all run over SC now. Verified end-to-end against the device.
 - ◯ Integration test against a stock cometbft v0.38 validator listener.
 
 ### ◯ M7 — TrustZone split

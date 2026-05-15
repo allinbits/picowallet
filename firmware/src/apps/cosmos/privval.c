@@ -1,23 +1,22 @@
-// Cosmos / Tendermint validator's privval handler.
+// Cosmos / CometBFT privval message parser + handlers.
 //
-// Step 4a: implements the WIRE FRAMING used by Tendermint privval --
-// uvarint length prefix followed by a body of that many bytes. Body is
-// length-delimited protobuf (which 4b will actually parse). For now we
-// just count frames and reply with a fixed framed stub message.
+// Wire framing: uvarint length prefix + length-delimited protobuf body
+// (Tendermint privval). Bytes arrive via `privval_feed_byte()` from the
+// cosmos SecretConnection driver (apps/cosmos/sc_driver_cosmos.c).
+// Responses are written through the caller-supplied `privval_sink_t`,
+// which the SC driver implements as "buffer this frame, then seal it".
 //
-// Single connection at a time (Tendermint validators only ever open one).
+// Single session at a time (cometbft validators only ever open one
+// connection to their remote signer).
 
 #include <stdio.h>
 #include <string.h>
-
-#include "lwip/tcp.h"
 
 #include "apps/cosmos/privval.h"
 #include "os/api.h"
 #include "os/crypto/keystore.h"
 #include "os/storage/hwm_flash.h"
 
-#define PRIVVAL_PORT    26658
 #define FRAME_MAX       4096   // generous cap on a single privval message
 
 typedef enum { PHASE_LEN, PHASE_BODY } phase_t;
@@ -41,8 +40,9 @@ static void state_reset(void) {
     g_state.body_pos  = 0;
 }
 
-// Write `body` as a uvarint-length-prefixed frame to the TCP connection.
-static void send_framed(struct tcp_pcb *pcb, const uint8_t *body, size_t len) {
+// Write `body` as a uvarint-length-prefixed frame through the sink. The
+// sink decides whether to deliver as raw TCP or sealed in an AEAD frame.
+static void send_framed(privval_sink_t *sink, const uint8_t *body, size_t len) {
     uint8_t hdr[10];
     size_t  hdr_n = 0;
     uint64_t l = len;
@@ -51,9 +51,9 @@ static void send_framed(struct tcp_pcb *pcb, const uint8_t *body, size_t len) {
         l >>= 7;
     }
     hdr[hdr_n++] = (uint8_t)l;
-    tcp_write(pcb, hdr,  hdr_n, TCP_WRITE_FLAG_COPY);
-    tcp_write(pcb, body, len,   TCP_WRITE_FLAG_COPY);
-    tcp_output(pcb);
+    sink->write(sink->ctx, hdr,  hdr_n);
+    sink->write(sink->ctx, body, len);
+    sink->flush(sink->ctx);
 }
 
 // Read a protobuf varint from `buf`. Returns 0 on success and writes the
@@ -170,20 +170,20 @@ static size_t pb_write_varint_field(uint8_t *buf, uint32_t field, uint64_t val) 
 // ===========================================================================
 
 // Outer Message {PingResponse {}}  ->  empty PingResponse at field 8
-static void send_ping_response(struct tcp_pcb *pcb) {
+static void send_ping_response(privval_sink_t *sink) {
     static const uint8_t bytes[] = { 0x42, 0x00 };  // field=8 wire=2, len=0
-    send_framed(pcb, bytes, sizeof(bytes));
+    send_framed(sink, bytes, sizeof(bytes));
 }
 
 // Outer Message {PubKeyResponse {pub_key={ed25519=<32 bytes>}}}
-static void send_pubkey_response(struct tcp_pcb *pcb) {
+static void send_pubkey_response(privval_sink_t *sink) {
     uint8_t pubkey[32];
     size_t  pubkey_len = 0;
     int rc = os_crypto_get_pubkey(OS_CURVE_ED25519, VALIDATOR_KEY_PATH,
                                   pubkey, sizeof(pubkey), &pubkey_len);
     if (rc != 0) {
         os_console_log("privval: pubkey derive failed");
-        send_ping_response(pcb);  // best we can do without a proper error type
+        send_ping_response(sink);  // best we can do without a proper error type
         return;
     }
 
@@ -199,7 +199,7 @@ static void send_pubkey_response(struct tcp_pcb *pcb) {
     uint8_t msg[128];
     size_t  msg_n = pb_write_bytes(msg, 2, pkr, pkr_n);
 
-    send_framed(pcb, msg, msg_n);
+    send_framed(sink, msg, msg_n);
 }
 
 // Build a RemoteSignerError {code=1, description=reason}
@@ -212,7 +212,7 @@ static size_t build_remote_signer_error(uint8_t *out, const char *reason) {
 }
 
 // Outer Message at outer_field, containing only an error field at error_field.
-static void send_error_in(struct tcp_pcb *pcb, uint32_t outer_field,
+static void send_error_in(privval_sink_t *sink, uint32_t outer_field,
                           uint32_t error_field, const char *reason) {
     uint8_t err[80];
     size_t  err_n = build_remote_signer_error(err, reason);
@@ -223,7 +223,7 @@ static void send_error_in(struct tcp_pcb *pcb, uint32_t outer_field,
     uint8_t msg[160];
     size_t  msg_n = pb_write_bytes(msg, outer_field, resp, resp_n);
 
-    send_framed(pcb, msg, msg_n);
+    send_framed(sink, msg, msg_n);
 }
 
 // ===========================================================================
@@ -561,13 +561,13 @@ static size_t encode_canonical_proposal(uint8_t *buf, const sign_request_t *r) {
 // Per-message-type dispatch
 // ===========================================================================
 
-static void handle_sign_vote(struct tcp_pcb *pcb,
+static void handle_sign_vote(privval_sink_t *sink,
                              const uint8_t *inner, size_t inner_len) {
     sign_request_t r;
     if (decode_sign_request_with(inner, inner_len, &r,
                                  decode_inner_vote_or_proposal) < 0) {
         os_console_log("privval: bad sign request");
-        send_error_in(pcb, 4, 2, "decode_failed");
+        send_error_in(sink, 4, 2, "decode_failed");
         return;
     }
 
@@ -579,7 +579,7 @@ static void handle_sign_vote(struct tcp_pcb *pcb,
     if (!hwm_advance(r.chain_id, strlen(r.chain_id),
                      r.type, r.height, r.round)) {
         os_console_log("vote: HWM reject (double-sign)");
-        send_error_in(pcb, 4, 2, "double_sign_refused");
+        send_error_in(sink, 4, 2, "double_sign_refused");
         return;
     }
 
@@ -599,7 +599,7 @@ static void handle_sign_vote(struct tcp_pcb *pcb,
                             sign_in, sign_in_len, sig);
     if (rc != 0) {
         os_console_log("vote: sign failed");
-        send_error_in(pcb, 4, 2, "sign_failed");
+        send_error_in(sink, 4, 2, "sign_failed");
         return;
     }
 
@@ -621,17 +621,17 @@ static void handle_sign_vote(struct tcp_pcb *pcb,
     uint8_t outer[750];
     size_t  outer_n = pb_write_bytes(outer, 4, resp, resp_n);
 
-    send_framed(pcb, outer, outer_n);
+    send_framed(sink, outer, outer_n);
     os_console_log("vote: SIGNED");
 }
 
-static void handle_sign_proposal(struct tcp_pcb *pcb,
+static void handle_sign_proposal(privval_sink_t *sink,
                                  const uint8_t *inner, size_t inner_len) {
     sign_request_t r;
     if (decode_sign_request_with(inner, inner_len, &r,
                                  decode_inner_proposal) < 0) {
         os_console_log("privval: bad proposal request");
-        send_error_in(pcb, 6, 2, "decode_failed");
+        send_error_in(sink, 6, 2, "decode_failed");
         return;
     }
 
@@ -643,7 +643,7 @@ static void handle_sign_proposal(struct tcp_pcb *pcb,
     if (!hwm_advance(r.chain_id, strlen(r.chain_id),
                      r.type, r.height, r.round)) {
         os_console_log("prop: HWM reject (double-sign)");
-        send_error_in(pcb, 6, 2, "double_sign_refused");
+        send_error_in(sink, 6, 2, "double_sign_refused");
         return;
     }
 
@@ -660,7 +660,7 @@ static void handle_sign_proposal(struct tcp_pcb *pcb,
                             sign_in, sign_in_len, sig);
     if (rc != 0) {
         os_console_log("prop: sign failed");
-        send_error_in(pcb, 6, 2, "sign_failed");
+        send_error_in(sink, 6, 2, "sign_failed");
         return;
     }
 
@@ -682,14 +682,14 @@ static void handle_sign_proposal(struct tcp_pcb *pcb,
     uint8_t outer[750];
     size_t  outer_n = pb_write_bytes(outer, 6, resp, resp_n);
 
-    send_framed(pcb, outer, outer_n);
+    send_framed(sink, outer, outer_n);
     os_console_log("prop: SIGNED");
 }
 
-static void handle_frame(struct tcp_pcb *pcb) {
+static void handle_frame(privval_sink_t *sink) {
     if (g_state.body_len == 0) {
         os_console_log("privval: empty frame");
-        send_ping_response(pcb);
+        send_ping_response(sink);
         return;
     }
 
@@ -697,7 +697,7 @@ static void handle_frame(struct tcp_pcb *pcb) {
     int tag_n = pb_read_tag(g_state.body, g_state.body_len, &field, &wire);
     if (tag_n < 0) {
         os_console_log("privval: bad outer tag");
-        send_ping_response(pcb);
+        send_ping_response(sink);
         return;
     }
 
@@ -721,26 +721,26 @@ static void handle_frame(struct tcp_pcb *pcb) {
 
     switch (field) {
         case 1:  // PubKeyRequest
-            send_pubkey_response(pcb);
+            send_pubkey_response(sink);
             break;
         case 3:  // SignVoteRequest
-            handle_sign_vote(pcb, inner, inner_len);
+            handle_sign_vote(sink, inner, inner_len);
             break;
         case 5:  // SignProposalRequest
-            handle_sign_proposal(pcb, inner, inner_len);
+            handle_sign_proposal(sink, inner, inner_len);
             break;
         case 7:  // PingRequest
-            send_ping_response(pcb);
+            send_ping_response(sink);
             break;
         default:
             os_console_log("privval: unknown msg type");
-            send_ping_response(pcb);
+            send_ping_response(sink);
     }
 }
 
 // Feed a single byte into the frame state machine.
 // Returns 0 on success, -1 if a malformed/oversize frame should kill the conn.
-static int feed_byte(struct tcp_pcb *pcb, uint8_t b) {
+static int feed_byte(privval_sink_t *sink, uint8_t b) {
     if (g_state.phase == PHASE_LEN) {
         // uvarint accumulator
         if (g_state.len_shift >= 64) return -1;   // varint too long
@@ -752,7 +752,7 @@ static int feed_byte(struct tcp_pcb *pcb, uint8_t b) {
             g_state.body_pos = 0;
             // empty frames are legal (e.g., PingRequest may serialize to 0 bytes)
             if (g_state.body_len == 0) {
-                handle_frame(pcb);
+                handle_frame(sink);
                 state_reset();
                 return 0;
             }
@@ -763,55 +763,22 @@ static int feed_byte(struct tcp_pcb *pcb, uint8_t b) {
     // PHASE_BODY
     g_state.body[g_state.body_pos++] = b;
     if (g_state.body_pos == g_state.body_len) {
-        handle_frame(pcb);
+        handle_frame(sink);
         state_reset();
     }
     return 0;
 }
 
-static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
-    (void)arg; (void)err;
-    if (!p) {
-        os_console_log("privval: client disconnected");
-        tcp_close(pcb);
-        return ERR_OK;
-    }
+// ---- Public API used by the cosmos SC driver (apps/cosmos/sc_driver_cosmos.c).
+// Only one privval session at a time is supported, which matches the wire
+// protocol's design. The previous plaintext TCP listener on port 26658
+// has been removed -- cometbft always wraps TCP signers in SecretConnection,
+// so the plaintext path could only ever serve dev tooling.
 
-    // Walk every byte across pbuf chain
-    for (struct pbuf *q = p; q != NULL; q = q->next) {
-        const uint8_t *bytes = (const uint8_t *)q->payload;
-        for (uint16_t i = 0; i < q->len; i++) {
-            if (feed_byte(pcb, bytes[i]) < 0) {
-                os_console_log("privval: bad frame, closing");
-                tcp_close(pcb);
-                pbuf_free(p);
-                return ERR_ABRT;
-            }
-        }
-    }
-
-    tcp_recved(pcb, p->tot_len);
-    pbuf_free(p);
-    return ERR_OK;
+void privval_reset_state(void) {
+    state_reset();
 }
 
-static err_t on_accept(void *arg, struct tcp_pcb *pcb, err_t err) {
-    (void)arg; (void)err;
-    os_console_log("privval: client connected");
-    state_reset();
-    tcp_recv(pcb, on_recv);
-    return ERR_OK;
-}
-
-void privval_init(void) {
-    state_reset();
-
-    // HWM is initialized once at boot in main.c (shared across apps).
-
-    struct tcp_pcb *pcb = tcp_new();
-    if (!pcb) return;
-    if (tcp_bind(pcb, IP_ADDR_ANY, PRIVVAL_PORT) != ERR_OK) return;
-    struct tcp_pcb *lpcb = tcp_listen(pcb);
-    if (!lpcb) return;
-    tcp_accept(lpcb, on_accept);
+int privval_feed_byte(privval_sink_t *sink, uint8_t b) {
+    return feed_byte(sink, b);
 }

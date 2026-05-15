@@ -18,7 +18,7 @@
 #include "os/version.h"
 #include "os/mode.h"
 
-#include "apps/cosmos/privval.h"
+#include "apps/cosmos/sc_driver_cosmos.h"
 #include "apps/gnoland/sc_driver.h"
 #include "os/storage/hwm_flash.h"
 #include "os/storage/auth_keys.h"
@@ -50,8 +50,8 @@ int main(void) {
         hwm_init();             // shared per-chain HWM cache across signing apps
         auth_keys_init();       // peer pubkey allowlist (default: permissive)
         eth_init();
-        privval_init();         // cosmos privval listener  (port 26658)
-        gno_sc_driver_init();   // gno SecretConnection listener (port 26659)
+        gno_sc_driver_init();       // gno SecretConnection            (port 26659)
+        cosmos_sc_driver_init();    // cometbft SecretConnection+Merlin (port 26660)
     }
 
     int failures = app_registry_init_all();

@@ -53,6 +53,7 @@ add_executable(picowallet
     src/apps/cosmos/app.c
     src/apps/cosmos/privval.c
     src/apps/cosmos/secret_connection_cosmos.c
+    src/apps/cosmos/sc_driver_cosmos.c
     src/apps/gnoland/app.c
     src/apps/gnoland/secret_connection_gno.c
     src/apps/gnoland/sc_driver.c
