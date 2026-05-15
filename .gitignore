@@ -1,0 +1,29 @@
+# Build artifacts
+firmware/build/
+*.elf
+*.bin
+*.uf2
+*.dis
+*.map
+*.hex
+
+# CMake / IDE
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+
+# Python tooling
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS junk
+.DS_Store
+
+# Local config overrides (not tracked)
+*.local

@@ -1,0 +1,6 @@
+[submodule "third_party/pico-sdk"]
+	path = third_party/pico-sdk
+	url = https://github.com/raspberrypi/pico-sdk.git
+[submodule "third_party/Pico_ePaper_Code"]
+	path = third_party/Pico_ePaper_Code
+	url = https://github.com/waveshareteam/Pico_ePaper_Code.git

@@ -1,0 +1,123 @@
+#include <stdio.h>
+#include <stdbool.h>
+#include <string.h>
+
+#include "pico/stdlib.h"
+#include "tusb.h"
+
+#include "os/hal/display.h"
+#include "os/hal/input.h"
+#include "os/hal/usb_console.h"
+#include "os/ui/console.h"
+#include "os/ui/splash.h"
+#include "os/ui/mode_select.h"
+#include "os/app_registry.h"
+#include "os/transport/host_protocol.h"
+#include "os/transport/usb.h"
+#include "os/transport/eth.h"
+#include "os/version.h"
+#include "os/mode.h"
+
+#include "apps/cosmos/privval.h"
+#include "apps/gnoland/sc_driver.h"
+#include "os/storage/hwm_flash.h"
+#include "os/storage/auth_keys.h"
+
+#define LED_PIN PICO_DEFAULT_LED_PIN
+
+int main(void) {
+    // NOTE: usb_init() is deferred until AFTER mode selection so the USB
+    // device enumerates with the right descriptor set the first time.
+
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+
+    display_init();
+    input_init();
+    usb_console_init();
+    console_init();
+
+    // Boot sequence: splash -> hold -> mode-selection prompt -> main screen.
+    splash_render();          // clears + multi-pass refresh, ~9 s
+    sleep_ms(4500);           // hold splash on screen
+
+    os_current_mode = mode_select_prompt();
+
+    // Bring USB up now that we know the mode; descriptors will be correct.
+    usb_init();
+
+    if (os_current_mode == OS_MODE_PRIVVAL) {
+        hwm_init();             // shared per-chain HWM cache across signing apps
+        auth_keys_init();       // peer pubkey allowlist (default: permissive)
+        eth_init();
+        privval_init();         // cosmos privval listener  (port 26658)
+        gno_sc_driver_init();   // gno SecretConnection listener (port 26659)
+    }
+
+    int failures = app_registry_init_all();
+
+    // Build the main screen content
+    {
+        char buf[40];
+        snprintf(buf, sizeof(buf), "mode: %s%s", os_mode_name(os_current_mode),
+                 os_current_mode == OS_MODE_PRIVVAL ? " (USB-ETH, Stage 2)" : " (USB-CDC)");
+        console_log(buf);
+    }
+    console_log("Installed apps:");
+    for (size_t i = 0; i < app_registry_count(); i++) {
+        const app_descriptor_t *a = app_registry_at(i);
+        char buf[40];
+        snprintf(buf, sizeof(buf), "  - %s", a->name);
+        console_log(buf);
+    }
+    if (failures) {
+        char buf[40];
+        snprintf(buf, sizeof(buf), "[warn] %d app init failure(s)", failures);
+        console_log(buf);
+    }
+
+    console_render_clean();   // multi-pass refresh into main screen
+    sleep_ms(300);
+
+    char line[512];
+    bool prev_connected = false;
+
+    while (1) {
+        // tud_task is pumped by the 1 kHz timer registered in usb_init.
+
+        if (os_current_mode == OS_MODE_PRIVVAL) {
+            // PrivVal: service lwIP -- frames in, TCP responses out. No CDC.
+            eth_service();
+
+            // Lazily refresh the on-device console at most every 10 s,
+            // and only when there's something new to draw. Full refresh
+            // blocks lwIP for ~3 s, so we keep it rare.
+            static uint32_t last_render_ms = 0;
+            uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+            if (console_is_dirty() && (now_ms - last_render_ms) > 10000) {
+                console_render();
+                last_render_ms = now_ms;
+            }
+            continue;
+        }
+
+        // TMKMS: text-protocol REPL over CDC.
+        // Re-send banner whenever a new host connects (so you don't have to
+        // reset the device just because `screen` was started after boot).
+        bool now_connected = tud_cdc_connected();
+        if (now_connected && !prev_connected) {
+            sleep_ms(50);  // let the host settle before sending bytes
+            usb_cdc_printf("\r\n=== PicoWallet " PICOWALLET_BUILD " ===\r\n");
+            usb_cdc_printf("Mode: %s\r\n", os_mode_name(os_current_mode));
+            usb_cdc_printf("Protocol: <app>.<cmd> [args];  OS via os.*\r\n");
+            usb_cdc_printf("Try: os.info, os.apps, os.pubkey, cosmos.info, gnoland.info\r\n");
+            usb_cdc_printf("> ");
+        }
+        prev_connected = now_connected;
+
+        int n = usb_console_poll_line(line, sizeof(line));
+        if (n >= 0) {
+            host_protocol_dispatch(line);
+        }
+    }
+}
