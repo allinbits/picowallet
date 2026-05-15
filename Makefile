@@ -80,3 +80,9 @@ size: $(ELF) ## report firmware section sizes
 	@which arm-none-eabi-size > /dev/null 2>&1 \
 	    && arm-none-eabi-size $(ELF) \
 	    || (echo "arm-none-eabi-size not found; falling back to ls"; ls -la $(ELF) $(UF2))
+
+test-keccak: ## host-side validation of Keccak-f1600 against SHA3-256("") vector
+	@cc -Ifirmware/src -Wall \
+	     tools/test_keccak.c firmware/src/os/crypto/keccak.c \
+	     -o /tmp/picowallet-test-keccak
+	@/tmp/picowallet-test-keccak

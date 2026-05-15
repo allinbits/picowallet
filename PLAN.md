@@ -241,7 +241,7 @@ Phase ✓ = completed (verified end-to-end). Phase ◯ = open.
 - Verified end-to-end: allowed peer succeeds, mismatching peer is closed
   immediately after handshake completes
 
-### ◯ M6 — Cosmos SecretConnection (Merlin variant)
+### ◐ M6 — Cosmos SecretConnection (Merlin variant)
 
 Current cometbft (v0.38+ and v2) uses **Merlin transcripts** (STROBE-128
 over Keccak-f1600) for challenge derivation in the SecretConnection
@@ -250,15 +250,27 @@ path so the cosmos app can interop with stock cometbft over an encrypted
 channel.
 
 Subtasks:
-- Implement Keccak-f1600 permutation
-- Implement STROBE-128 mode (`AD`, `KEY`, `PRF`, `META_AD` operations)
-- Implement Merlin labeled-transcript wrapper
-  (`new_transcript`, `append_message`, `challenge_bytes`)
-- Wire into `apps/cosmos/sc_driver.c` as an alternate handshake path
-- Add protobuf-delimited handshake messages
-  (`gogotypes.BytesValue` for ephemeral, `tmp2p.AuthSigMessage` for auth)
-- Extend pwctl to drive the cometbft variant
-- Test against a stock cometbft v0.38 validator listener
+- ✓ Implement Keccak-f1600 permutation — `firmware/src/os/crypto/keccak.{h,c}`,
+  validated against SHA3-256("") via `make test-keccak`
+- ◯ Implement STROBE-128 mode (`AD`, `META_AD`, `PRF` operations only —
+  Merlin doesn't need `KEY`, `SEND_*`, `RECV_*`, `MAC`). Verify against
+  known STROBE test vectors.
+- ◯ Implement Merlin labeled-transcript wrapper
+  (`new(label)`, `append_message(label, bytes)`, `challenge_bytes(label, dst)`).
+  Verify against merlin-rs `equivalence_simple` vector
+  (`d5a21b1cb12170e9...` for the canonical `(test protocol, some label, some data, challenge)` tuple).
+- ◯ Add `apps/cosmos/secret_connection_cosmos.{h,c}` — handshake state
+  machine analogous to gno's, but using Merlin for challenge derivation
+  and protobuf-delimited wire framing for the ephemeral / auth-sig
+  messages (`gogotypes.BytesValue`, `tmp2p.AuthSigMessage` with pubkey
+  oneof).
+- ◯ Add `apps/cosmos/sc_driver_cosmos.{h,c}` — TCP driver listening on a
+  third port (26660 suggested), reusing the shared `secret_connection.c`
+  frame layer (AEAD + HKDF key derivation are identical).
+- ◯ Extend `tools/pwctl.py` with `cosmos-sc-handshake` subcommand —
+  Python port of Merlin + protobuf-delimited wire so we can validate
+  end-to-end without spinning up a real cometbft validator.
+- ◯ Integration test against a stock cometbft v0.38 validator listener.
 
 ### ◯ M7 — TrustZone split
 
