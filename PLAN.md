@@ -252,13 +252,12 @@ channel.
 Subtasks:
 - ✓ Implement Keccak-f1600 permutation — `firmware/src/os/crypto/keccak.{h,c}`,
   validated against SHA3-256("") via `make test-keccak`
-- ◯ Implement STROBE-128 mode (`AD`, `META_AD`, `PRF` operations only —
-  Merlin doesn't need `KEY`, `SEND_*`, `RECV_*`, `MAC`). Verify against
-  known STROBE test vectors.
-- ◯ Implement Merlin labeled-transcript wrapper
-  (`new(label)`, `append_message(label, bytes)`, `challenge_bytes(label, dst)`).
-  Verify against merlin-rs `equivalence_simple` vector
-  (`d5a21b1cb12170e9...` for the canonical `(test protocol, some label, some data, challenge)` tuple).
+- ✓ Implement STROBE-128 (AD/META_AD/PRF subset) —
+  `firmware/src/os/crypto/strobe.{h,c}`, translated from oasisprotocol/curve25519-voi
+- ✓ Implement Merlin labeled transcripts — `firmware/src/os/crypto/merlin.{h,c}`,
+  validated bit-for-bit against curve25519-voi `TestSimpleTranscript`
+  (`d5a21972d0d5fe32...`) and `TestComplexTranscript`
+  (`a8c933f54fae76e3...`) via `make test-merlin`
 - ◯ Add `apps/cosmos/secret_connection_cosmos.{h,c}` — handshake state
   machine analogous to gno's, but using Merlin for challenge derivation
   and protobuf-delimited wire framing for the ephemeral / auth-sig

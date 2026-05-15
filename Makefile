@@ -86,3 +86,12 @@ test-keccak: ## host-side validation of Keccak-f1600 against SHA3-256("") vector
 	     tools/test_keccak.c firmware/src/os/crypto/keccak.c \
 	     -o /tmp/picowallet-test-keccak
 	@/tmp/picowallet-test-keccak
+
+test-merlin: ## host-side validation of Merlin transcripts vs curve25519-voi vectors
+	@cc -Ifirmware/src -Wall -O2 \
+	     tools/test_merlin.c \
+	     firmware/src/os/crypto/keccak.c \
+	     firmware/src/os/crypto/strobe.c \
+	     firmware/src/os/crypto/merlin.c \
+	     -o /tmp/picowallet-test-merlin
+	@/tmp/picowallet-test-merlin

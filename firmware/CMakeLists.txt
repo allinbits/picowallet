@@ -43,6 +43,9 @@ add_executable(picowallet
     src/os/crypto/monocypher-ed25519.c
     src/os/crypto/keystore.c
     src/os/crypto/sha256.c
+    src/os/crypto/keccak.c
+    src/os/crypto/strobe.c
+    src/os/crypto/merlin.c
     src/os/storage/hwm_flash.c
     src/os/storage/auth_keys.c
 
