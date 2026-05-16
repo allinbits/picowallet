@@ -97,28 +97,6 @@ target_link_libraries(picowallet
     pico_rand
 )
 
-# Diagnostic: minimal outbound-TCP smoke test (apps/dialer_test.c). Used to
-# isolate the cosmos dialer wedge. When set, the cosmos SC driver is forced
-# back to listener mode (the dialer-under-test lives in dialer_test.c).
-#
-#   cmake -S firmware -B firmware/build \
-#         -DDIAL_TEST_HOST=192.168.7.2 -DDIAL_TEST_PORT=9999
-#   cmake -S firmware -B firmware/build \
-#         -DDIAL_TEST_HOST=192.168.7.2 -DDIAL_TEST_PORT=9999 -DDIAL_TEST_STATIC_ARP=ON
-if(DIAL_TEST_HOST)
-    target_compile_definitions(picowallet PRIVATE
-        DIAL_TEST_HOST="${DIAL_TEST_HOST}")
-    if(DIAL_TEST_PORT)
-        target_compile_definitions(picowallet PRIVATE
-            DIAL_TEST_PORT=${DIAL_TEST_PORT})
-    endif()
-    if(DIAL_TEST_STATIC_ARP)
-        target_compile_definitions(picowallet PRIVATE DIAL_TEST_STATIC_ARP=1)
-        message(STATUS "dial-test: static ARP entry enabled")
-    endif()
-    message(STATUS "dial-test: ENABLED -> ${DIAL_TEST_HOST}:${DIAL_TEST_PORT}")
-endif()
-
 # We provide our own USB descriptors; do NOT enable SDK auto-CDC.
 pico_enable_stdio_usb(picowallet 0)
 pico_enable_stdio_uart(picowallet 0)

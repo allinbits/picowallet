@@ -102,7 +102,6 @@ Reboot to switch.
               ┌────────────────────┴───────────────────────┐
               │  Shared transports                         │
               │   • SecretConnection frame layer (AEAD)    │
-              │   • Plain TCP (cosmos privval today)       │
               │   • USB CDC REPL (TMKMS mode)              │
               └────────────────────┬───────────────────────┘
                                    │
@@ -110,8 +109,8 @@ Reboot to switch.
               │  OS                                        │
               │   • mode select + app registry             │
               │   • keystore (Ed25519 SLIP-10)             │
-              │   • HWM ring buffer (per-chain, flash)     │
-              │   • peer allowlist (flash)                 │
+              │   • HWM (per-slot regions, flash)          │
+              │   • chain config + per-slot pinning (flash)│
               │   • SHA-256 / HMAC / HKDF (HW-accel)       │
               │   • display + buttons + LED                │
               └────────────────────────────────────────────┘
@@ -368,7 +367,6 @@ development.
 | | PIN unlock + key-at-rest encryption | Currently the keystore is at-rest in flash with no PIN gate |
 | | Multi-validator key selection | Hardcoded `m/0'` path; real product needs named keys + selection UX |
 | | Console paging / longer history | Console buffer is small; long logs lose old lines |
-| | Proper SignedMsgType ordering for HWM | Current code treats type as monotonic; that's correct for vote-only validators but wrong for proposer-validators (Proposal=32 → Prevote=1 would be rejected). Map types to steps |
 | | Operational metrics over TMKMS REPL | Sign counter, HWM per chain, last error, etc. |
 | | Factory reset UX | `hwm_flash_wipe` exists; needs a long-press button confirmation flow |
 
