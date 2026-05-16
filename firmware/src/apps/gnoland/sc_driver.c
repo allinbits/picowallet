@@ -10,7 +10,10 @@
 // does both sides concurrently in goroutines, so this asymmetric ordering
 // is compatible -- only one side blocks waiting, never both.
 //
-// Single connection at a time (validators only ever open one).
+// Per-connection state is allocated from a small pool and attached to
+// each pcb via tcp_arg. Pool size is 1 today (single-listener behavior
+// unchanged from before); a later commit bumps it to match the number of
+// configured gno chain slots.
 
 #include <stdio.h>
 #include <string.h>
@@ -33,21 +36,36 @@ typedef enum {
     RX_PRIVVAL,         // handshake done; reading sealed privval frames
 } rx_phase_t;
 
-typedef struct {
-    gno_sc_t   handshake;       // populated lazily on first on_recv
-    bool       handshake_init;  // gno_sc_start called?
-    rx_phase_t phase;
-    uint8_t    val_pub[32];
-    uint8_t    rx_buf[GNO_SC_AUTH_SEALED_SIZE];  // big enough for either stage
-    uint16_t   rx_need;
-    uint16_t   rx_got;
-} conn_state_t;
+typedef struct gno_conn {
+    bool             in_use;
+    struct tcp_pcb  *pcb;
+    gno_sc_t         handshake;
+    bool             handshake_init;
+    rx_phase_t       phase;
+    uint8_t          val_pub[32];
+    uint8_t          rx_buf[GNO_SC_AUTH_SEALED_SIZE];  // big enough for either stage
+    uint16_t         rx_need;
+    uint16_t         rx_got;
+} gno_conn_t;
 
-static conn_state_t g_state;
+#define GNO_CONN_POOL_SIZE  1
+static gno_conn_t g_pool[GNO_CONN_POOL_SIZE];
 
-static void state_reset(void) {
-    memset(&g_state, 0, sizeof(g_state));
-    g_state.phase = RX_NONE;
+static gno_conn_t *conn_alloc(void) {
+    for (size_t i = 0; i < GNO_CONN_POOL_SIZE; i++) {
+        if (!g_pool[i].in_use) {
+            memset(&g_pool[i], 0, sizeof(g_pool[i]));
+            g_pool[i].in_use = true;
+            g_pool[i].phase  = RX_NONE;
+            return &g_pool[i];
+        }
+    }
+    return NULL;
+}
+
+static void conn_free(gno_conn_t *c) {
+    if (!c) return;
+    memset(c, 0, sizeof(*c));
 }
 
 // Push len bytes via tcp_write+tcp_output. Returns 0 on success, -1 on err.
@@ -73,22 +91,22 @@ static int push_bytes(struct tcp_pcb *pcb, const uint8_t *bytes, uint16_t len) {
 
 // Drive the state machine forward whenever rx_got reaches rx_need.
 // Returns 0 if the connection should stay open; -1 to close.
-static int advance(struct tcp_pcb *pcb) {
-    if (g_state.rx_got < g_state.rx_need) return 0;  // need more bytes
+static int advance(gno_conn_t *c) {
+    if (c->rx_got < c->rx_need) return 0;  // need more bytes
 
-    if (g_state.phase == RX_EPH) {
+    if (c->phase == RX_EPH) {
         // Peer's 35-byte ephemeral is in rx_buf. Now generate ours, push it,
         // derive keys, sign the challenge via the OS keystore, seal the
         // auth-sig, and push that too.
         uint8_t eph_msg[GNO_SC_EPH_MSG_SIZE];
-        gno_sc_start(&g_state.handshake, g_state.val_pub, eph_msg);
-        g_state.handshake_init = true;
-        if (push_bytes(pcb, eph_msg, GNO_SC_EPH_MSG_SIZE) != 0) {
+        gno_sc_start(&c->handshake, c->val_pub, eph_msg);
+        c->handshake_init = true;
+        if (push_bytes(c->pcb, eph_msg, GNO_SC_EPH_MSG_SIZE) != 0) {
             os_console_log("gno-sc: tx eph failed");
             return -1;
         }
 
-        int rc = gno_sc_derive_keys(&g_state.handshake, g_state.rx_buf);
+        int rc = gno_sc_derive_keys(&c->handshake, c->rx_buf);
         if (rc != 0) {
             os_console_log("gno-sc: derive_keys failed");
             return -1;
@@ -96,7 +114,7 @@ static int advance(struct tcp_pcb *pcb) {
 
         uint8_t sig[64];
         rc = os_crypto_sign(OS_CURVE_ED25519, VALIDATOR_KEY_PATH,
-                            g_state.handshake.challenge,
+                            c->handshake.challenge,
                             GNO_SC_CHALLENGE_SIZE, sig);
         if (rc != 0) {
             os_console_log("gno-sc: os_crypto_sign failed");
@@ -104,23 +122,23 @@ static int advance(struct tcp_pcb *pcb) {
         }
 
         uint8_t sealed[GNO_SC_AUTH_SEALED_SIZE];
-        if (gno_sc_seal_auth(&g_state.handshake, sig, sealed) != 0) {
+        if (gno_sc_seal_auth(&c->handshake, sig, sealed) != 0) {
             os_console_log("gno-sc: seal_auth failed");
             return -1;
         }
-        if (push_bytes(pcb, sealed, GNO_SC_AUTH_SEALED_SIZE) != 0) {
+        if (push_bytes(c->pcb, sealed, GNO_SC_AUTH_SEALED_SIZE) != 0) {
             os_console_log("gno-sc: tx auth failed");
             return -1;
         }
 
-        g_state.phase   = RX_AUTH;
-        g_state.rx_got  = 0;
-        g_state.rx_need = GNO_SC_AUTH_SEALED_SIZE;
+        c->phase   = RX_AUTH;
+        c->rx_got  = 0;
+        c->rx_need = GNO_SC_AUTH_SEALED_SIZE;
         return 0;
     }
 
-    if (g_state.phase == RX_AUTH) {
-        int rc = gno_sc_handle_auth(&g_state.handshake, g_state.rx_buf);
+    if (c->phase == RX_AUTH) {
+        int rc = gno_sc_handle_auth(&c->handshake, c->rx_buf);
         if (rc != 0) {
             char buf[48];
             snprintf(buf, sizeof(buf), "gno-sc: handle_auth rc=%d", rc);
@@ -132,24 +150,24 @@ static int advance(struct tcp_pcb *pcb) {
         // notice they're unpinned.
         if (chains_pinned_count() == 0) {
             os_console_log("gno-sc: WARN no pinned peer keys (permissive)");
-        } else if (!chains_pinned_check(g_state.handshake.rem_pub)) {
+        } else if (!chains_pinned_check(c->handshake.rem_pub)) {
             os_console_log("gno-sc: peer pubkey not in allowlist; closing");
             return -1;
         }
         os_console_log("gno-sc: handshake complete");
         // Switch to reading sealed privval frames.
-        g_state.phase   = RX_PRIVVAL;
-        g_state.rx_got  = 0;
-        g_state.rx_need = SC_SEALED_FRAME_SIZE;
+        c->phase   = RX_PRIVVAL;
+        c->rx_got  = 0;
+        c->rx_need = SC_SEALED_FRAME_SIZE;
         return 0;
     }
 
-    if (g_state.phase == RX_PRIVVAL) {
+    if (c->phase == RX_PRIVVAL) {
         // One sealed frame = one privval request (multi-frame messages
         // aren't supported yet; gno's PubKey/SignRequest are tiny and fit).
         uint8_t plain[SC_DATA_MAX_SIZE];
         uint32_t plain_len = 0;
-        int rc = sc_open_frame(&g_state.handshake.sc, g_state.rx_buf,
+        int rc = sc_open_frame(&c->handshake.sc, c->rx_buf,
                                plain, &plain_len);
         if (rc != 0) {
             os_console_log("gno-sc: open_frame failed");
@@ -170,7 +188,7 @@ static int advance(struct tcp_pcb *pcb) {
         size_t  resp_len = 0;
         if (req_type == GNO_PRIVVAL_REQ_PUBKEY) {
             resp_len = gno_privval_encode_pubkey_response(
-                g_state.val_pub, resp_plain, sizeof(resp_plain));
+                c->val_pub, resp_plain, sizeof(resp_plain));
             if (!resp_len) {
                 os_console_log("gno-sc: encode pubkey_resp failed");
                 return -1;
@@ -232,16 +250,16 @@ static int advance(struct tcp_pcb *pcb) {
 
     emit_response: ;
         uint8_t sealed[SC_SEALED_FRAME_SIZE];
-        sc_seal_frame(&g_state.handshake.sc, resp_plain,
+        sc_seal_frame(&c->handshake.sc, resp_plain,
                       (uint32_t)resp_len, sealed);
-        if (push_bytes(pcb, sealed, SC_SEALED_FRAME_SIZE) != 0) {
+        if (push_bytes(c->pcb, sealed, SC_SEALED_FRAME_SIZE) != 0) {
             os_console_log("gno-sc: tx response failed");
             return -1;
         }
 
         // Ready for the next request frame.
-        g_state.rx_got  = 0;
-        g_state.rx_need = SC_SEALED_FRAME_SIZE;
+        c->rx_got  = 0;
+        c->rx_need = SC_SEALED_FRAME_SIZE;
         return 0;
     }
 
@@ -249,10 +267,12 @@ static int advance(struct tcp_pcb *pcb) {
 }
 
 static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
-    (void)arg; (void)err;
+    (void)err;
+    gno_conn_t *c = (gno_conn_t *)arg;
     if (!p) {
         os_console_log("gno-sc: client disconnected");
         tcp_close(pcb);
+        conn_free(c);
         return ERR_OK;
     }
 
@@ -261,17 +281,18 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) 
         uint16_t avail = q->len;
         uint16_t off   = 0;
         while (off < avail) {
-            uint16_t want = g_state.rx_need - g_state.rx_got;
+            uint16_t want = c->rx_need - c->rx_got;
             uint16_t take = (uint16_t)(avail - off);
             if (take > want) take = want;
-            memcpy(g_state.rx_buf + g_state.rx_got, bytes + off, take);
-            g_state.rx_got += take;
+            memcpy(c->rx_buf + c->rx_got, bytes + off, take);
+            c->rx_got += take;
             off += take;
 
-            if (advance(pcb) < 0) {
+            if (advance(c) < 0) {
                 tcp_recved(pcb, p->tot_len);
                 pbuf_free(p);
                 tcp_close(pcb);
+                conn_free(c);
                 return ERR_ABRT;
             }
         }
@@ -284,31 +305,39 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) 
 
 static err_t on_accept(void *arg, struct tcp_pcb *pcb, err_t err) {
     (void)arg; (void)err;
+    gno_conn_t *c = conn_alloc();
+    if (!c) {
+        os_console_log("gno-sc: pool full; rejecting");
+        tcp_close(pcb);
+        return ERR_MEM;
+    }
     os_console_log("gno-sc: client connected");
-    state_reset();
+    c->pcb = pcb;
 
     // Load the validator's long-term Ed25519 pubkey from the OS keystore.
     // We capture it now (in accept) but DON'T tcp_write from here -- see
     // [[reference_lwip_accept_no_write]]. All writes happen from on_recv.
     size_t  val_pub_len = 0;
     if (os_crypto_get_pubkey(OS_CURVE_ED25519, VALIDATOR_KEY_PATH,
-                             g_state.val_pub, sizeof(g_state.val_pub),
+                             c->val_pub, sizeof(c->val_pub),
                              &val_pub_len) != 0
         || val_pub_len != 32) {
         os_console_log("gno-sc: get_pubkey failed");
         tcp_close(pcb);
+        conn_free(c);
         return ERR_ABRT;
     }
 
-    g_state.phase   = RX_EPH;
-    g_state.rx_need = GNO_SC_EPH_MSG_SIZE;
-    g_state.rx_got  = 0;
+    c->phase   = RX_EPH;
+    c->rx_need = GNO_SC_EPH_MSG_SIZE;
+    c->rx_got  = 0;
+    tcp_arg(pcb,  c);
     tcp_recv(pcb, on_recv);
     return ERR_OK;
 }
 
 void gno_sc_driver_init(void) {
-    state_reset();
+    memset(g_pool, 0, sizeof(g_pool));
 
     struct tcp_pcb *pcb = tcp_new();
     if (!pcb) return;

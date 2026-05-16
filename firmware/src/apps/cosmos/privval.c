@@ -6,8 +6,8 @@
 // Responses are written through the caller-supplied `privval_sink_t`,
 // which the SC driver implements as "buffer this frame, then seal it".
 //
-// Single session at a time (cometbft validators only ever open one
-// connection to their remote signer).
+// Parser state is caller-owned (privval_state_t in privval.h) so the
+// driver can host concurrent privval sessions, one per SC connection.
 
 #include <stdio.h>
 #include <string.h>
@@ -17,27 +17,16 @@
 #include "os/crypto/keystore.h"
 #include "os/storage/hwm_flash.h"
 
-#define FRAME_MAX       4096   // generous cap on a single privval message
+#define FRAME_MAX       PRIVVAL_FRAME_MAX
+#define PHASE_LEN       0
+#define PHASE_BODY      1
 
-typedef enum { PHASE_LEN, PHASE_BODY } phase_t;
-
-typedef struct {
-    phase_t  phase;
-    uint64_t len_value;
-    int      len_shift;
-    uint8_t  body[FRAME_MAX];
-    size_t   body_len;
-    size_t   body_pos;
-} conn_state_t;
-
-static conn_state_t g_state;
-
-static void state_reset(void) {
-    g_state.phase     = PHASE_LEN;
-    g_state.len_value = 0;
-    g_state.len_shift = 0;
-    g_state.body_len  = 0;
-    g_state.body_pos  = 0;
+static void state_reset(privval_state_t *st) {
+    st->phase     = PHASE_LEN;
+    st->len_value = 0;
+    st->len_shift = 0;
+    st->body_len  = 0;
+    st->body_pos  = 0;
 }
 
 // Write `body` as a uvarint-length-prefixed frame through the sink. The
@@ -745,15 +734,15 @@ static void handle_sign_proposal(privval_sink_t *sink,
     os_console_log("prop: SIGNED");
 }
 
-static void handle_frame(privval_sink_t *sink) {
-    if (g_state.body_len == 0) {
+static void handle_frame(privval_state_t *st, privval_sink_t *sink) {
+    if (st->body_len == 0) {
         os_console_log("privval: empty frame");
         send_ping_response(sink);
         return;
     }
 
     uint32_t field, wire;
-    int tag_n = pb_read_tag(g_state.body, g_state.body_len, &field, &wire);
+    int tag_n = pb_read_tag(st->body, st->body_len, &field, &wire);
     if (tag_n < 0) {
         os_console_log("privval: bad outer tag");
         send_ping_response(sink);
@@ -768,12 +757,12 @@ static void handle_frame(privval_sink_t *sink) {
     // body to the type-specific handler. (Ping has empty body, no inner len.)
     const uint8_t *inner     = NULL;
     size_t         inner_len = 0;
-    if (wire == 2 && (size_t)tag_n < g_state.body_len) {
+    if (wire == 2 && (size_t)tag_n < st->body_len) {
         uint64_t l; size_t ln;
-        if (pb_read_varint(g_state.body + tag_n,
-                           g_state.body_len - tag_n, &l, &ln) == 0
-            && tag_n + ln + l <= g_state.body_len) {
-            inner     = g_state.body + tag_n + ln;
+        if (pb_read_varint(st->body + tag_n,
+                           st->body_len - tag_n, &l, &ln) == 0
+            && tag_n + ln + l <= st->body_len) {
+            inner     = st->body + tag_n + ln;
             inner_len = (size_t)l;
         }
     }
@@ -797,47 +786,40 @@ static void handle_frame(privval_sink_t *sink) {
     }
 }
 
+// ---- Public API used by the cosmos SC driver (apps/cosmos/sc_driver_cosmos.c).
+// State is caller-owned, so concurrent privval sessions are supported.
+
+void privval_reset_state(privval_state_t *st) {
+    state_reset(st);
+}
+
 // Feed a single byte into the frame state machine.
 // Returns 0 on success, -1 if a malformed/oversize frame should kill the conn.
-static int feed_byte(privval_sink_t *sink, uint8_t b) {
-    if (g_state.phase == PHASE_LEN) {
+int privval_feed_byte(privval_state_t *st, privval_sink_t *sink, uint8_t b) {
+    if (st->phase == PHASE_LEN) {
         // uvarint accumulator
-        if (g_state.len_shift >= 64) return -1;   // varint too long
-        g_state.len_value |= ((uint64_t)(b & 0x7F)) << g_state.len_shift;
-        g_state.len_shift += 7;
+        if (st->len_shift >= 64) return -1;   // varint too long
+        st->len_value |= ((uint64_t)(b & 0x7F)) << st->len_shift;
+        st->len_shift += 7;
         if ((b & 0x80) == 0) {
-            if (g_state.len_value > FRAME_MAX) return -1;
-            g_state.body_len = (size_t)g_state.len_value;
-            g_state.body_pos = 0;
+            if (st->len_value > FRAME_MAX) return -1;
+            st->body_len = (size_t)st->len_value;
+            st->body_pos = 0;
             // empty frames are legal (e.g., PingRequest may serialize to 0 bytes)
-            if (g_state.body_len == 0) {
-                handle_frame(sink);
-                state_reset();
+            if (st->body_len == 0) {
+                handle_frame(st, sink);
+                state_reset(st);
                 return 0;
             }
-            g_state.phase = PHASE_BODY;
+            st->phase = PHASE_BODY;
         }
         return 0;
     }
     // PHASE_BODY
-    g_state.body[g_state.body_pos++] = b;
-    if (g_state.body_pos == g_state.body_len) {
-        handle_frame(sink);
-        state_reset();
+    st->body[st->body_pos++] = b;
+    if (st->body_pos == st->body_len) {
+        handle_frame(st, sink);
+        state_reset(st);
     }
     return 0;
-}
-
-// ---- Public API used by the cosmos SC driver (apps/cosmos/sc_driver_cosmos.c).
-// Only one privval session at a time is supported, which matches the wire
-// protocol's design. The previous plaintext TCP listener on port 26658
-// has been removed -- cometbft always wraps TCP signers in SecretConnection,
-// so the plaintext path could only ever serve dev tooling.
-
-void privval_reset_state(void) {
-    state_reset();
-}
-
-int privval_feed_byte(privval_sink_t *sink, uint8_t b) {
-    return feed_byte(sink, b);
 }
