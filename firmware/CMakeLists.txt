@@ -58,6 +58,7 @@ add_executable(picowallet
     src/apps/gnoland/secret_connection_gno.c
     src/apps/gnoland/sc_driver.c
     src/apps/gnoland/gno_privval.c
+    src/apps/dialer_test.c
     ${WS_LIB}/Config/DEV_Config.c
     ${WS_LIB}/e-Paper/EPD_3in7.c
     ${WS_LIB}/GUI/GUI_Paint.c
@@ -96,6 +97,47 @@ target_link_libraries(picowallet
     # Hardware TRNG-backed PRNG (RP2350)
     pico_rand
 )
+
+# Optional: build the cosmos SecretConnection driver in dialer mode.
+# When COSMOS_SC_DIAL_HOST is set, the device will dial out to that address
+# (cometbft's priv_validator_laddr listener) instead of listening for clients
+# to connect. Used for the testnet integration in scripts/testnet.sh.
+#
+#   cmake -S firmware -B firmware/build \
+#         -DCOSMOS_SC_DIAL_HOST=192.168.7.2 -DCOSMOS_SC_DIAL_PORT=26690
+if(COSMOS_SC_DIAL_HOST)
+    target_compile_definitions(picowallet PRIVATE
+        COSMOS_SC_DIAL_HOST="${COSMOS_SC_DIAL_HOST}")
+    if(COSMOS_SC_DIAL_PORT)
+        target_compile_definitions(picowallet PRIVATE
+            COSMOS_SC_DIAL_PORT=${COSMOS_SC_DIAL_PORT})
+    endif()
+    message(STATUS "cosmos-sc: DIALER mode -> ${COSMOS_SC_DIAL_HOST}:${COSMOS_SC_DIAL_PORT}")
+else()
+    message(STATUS "cosmos-sc: LISTENER mode (default)")
+endif()
+
+# Diagnostic: minimal outbound-TCP smoke test (apps/dialer_test.c). Used to
+# isolate the cosmos dialer wedge. When set, the cosmos SC driver is forced
+# back to listener mode (the dialer-under-test lives in dialer_test.c).
+#
+#   cmake -S firmware -B firmware/build \
+#         -DDIAL_TEST_HOST=192.168.7.2 -DDIAL_TEST_PORT=9999
+#   cmake -S firmware -B firmware/build \
+#         -DDIAL_TEST_HOST=192.168.7.2 -DDIAL_TEST_PORT=9999 -DDIAL_TEST_STATIC_ARP=ON
+if(DIAL_TEST_HOST)
+    target_compile_definitions(picowallet PRIVATE
+        DIAL_TEST_HOST="${DIAL_TEST_HOST}")
+    if(DIAL_TEST_PORT)
+        target_compile_definitions(picowallet PRIVATE
+            DIAL_TEST_PORT=${DIAL_TEST_PORT})
+    endif()
+    if(DIAL_TEST_STATIC_ARP)
+        target_compile_definitions(picowallet PRIVATE DIAL_TEST_STATIC_ARP=1)
+        message(STATUS "dial-test: static ARP entry enabled")
+    endif()
+    message(STATUS "dial-test: ENABLED -> ${DIAL_TEST_HOST}:${DIAL_TEST_PORT}")
+endif()
 
 # We provide our own USB descriptors; do NOT enable SDK auto-CDC.
 pico_enable_stdio_usb(picowallet 0)

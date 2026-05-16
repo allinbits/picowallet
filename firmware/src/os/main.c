@@ -20,6 +20,9 @@
 
 #include "apps/cosmos/sc_driver_cosmos.h"
 #include "apps/gnoland/sc_driver.h"
+#include "apps/dialer_test.h"
+#include "os/api.h"
+#include "os/ui/console.h"
 #include "os/storage/hwm_flash.h"
 #include "os/storage/auth_keys.h"
 
@@ -50,8 +53,37 @@ int main(void) {
         hwm_init();             // shared per-chain HWM cache across signing apps
         auth_keys_init();       // peer pubkey allowlist (default: permissive)
         eth_init();
+
+        // Log the consensus pubkey so it can be reconciled against the
+        // chain's genesis (cometbft verifies votes against the genesis
+        // pubkey, NOT what the device returns at runtime).
+        {
+            uint8_t pub[32];
+            size_t  pub_len = 0;
+            if (os_crypto_get_pubkey(OS_CURVE_ED25519, "m/0'",
+                                     pub, sizeof(pub), &pub_len) == 0
+                && pub_len == 32) {
+                char line[64];
+                snprintf(line, sizeof(line),
+                         "val: %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                         pub[0],  pub[1],  pub[2],  pub[3],
+                         pub[4],  pub[5],  pub[6],  pub[7],
+                         pub[8],  pub[9],  pub[10], pub[11],
+                         pub[12], pub[13], pub[14], pub[15]);
+                console_log(line);
+                snprintf(line, sizeof(line),
+                         "     %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                         pub[16], pub[17], pub[18], pub[19],
+                         pub[20], pub[21], pub[22], pub[23],
+                         pub[24], pub[25], pub[26], pub[27],
+                         pub[28], pub[29], pub[30], pub[31]);
+                console_log(line);
+            }
+        }
+
         gno_sc_driver_init();       // gno SecretConnection            (port 26659)
         cosmos_sc_driver_init();    // cometbft SecretConnection+Merlin (port 26660)
+        dialer_test_init();         // no-op unless -DDIAL_TEST_HOST=... at build
     }
 
     int failures = app_registry_init_all();
@@ -88,6 +120,8 @@ int main(void) {
         if (os_current_mode == OS_MODE_PRIVVAL) {
             // PrivVal: service lwIP -- frames in, TCP responses out. No CDC.
             eth_service();
+            cosmos_sc_driver_service(); // dialer retries; no-op in listener mode
+            dialer_test_service();      // no-op unless -DDIAL_TEST_HOST=... at build
 
             // Lazily refresh the on-device console at most every 10 s,
             // and only when there's something new to draw. Full refresh

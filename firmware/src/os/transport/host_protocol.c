@@ -15,6 +15,7 @@
 #include "os/crypto/keystore.h"
 #include "os/mode.h"
 #include "os/storage/auth_keys.h"
+#include "os/storage/hwm_flash.h"
 
 #define LED_PIN PICO_DEFAULT_LED_PIN
 #define REPLY_BUF 160
@@ -175,6 +176,11 @@ static int dispatch_os(const char *cmd, const char *args,
     if (strcmp(cmd, "auth_clear") == 0) {
         auth_keys_clear();
         snprintf(reply, reply_size, "cleared (back to permissive)");
+        return 0;
+    }
+    if (strcmp(cmd, "hwm_wipe") == 0) {
+        hwm_flash_wipe();
+        snprintf(reply, reply_size, "hwm wiped");
         return 0;
     }
     if (strcmp(cmd, "pubkey") == 0) {

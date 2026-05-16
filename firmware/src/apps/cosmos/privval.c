@@ -477,79 +477,138 @@ static size_t write_sfixed64_field(uint8_t *buf, uint32_t field, uint64_t val) {
     return n;
 }
 
+// Encode CanonicalBlockID. Mirrors cometbft's gogoproto-generated marshal,
+// which OMITS scalar fields whose value is the proto3 default (0/empty).
+// CanonicalPartSetHeader inside is ALWAYS emitted (it's nullable=false in
+// the proto, so even an empty PartSetHeader becomes `12 00`).
 static size_t encode_canonical_block_id(uint8_t *buf, const sign_request_t *r) {
     uint8_t inner[80];
     size_t  in = 0;
     if (r->block_hash_len > 0) {
         in += pb_write_bytes(inner + in, 1, r->block_hash, r->block_hash_len);
     }
-    if (r->has_parts_header) {
-        uint8_t pth[40];
-        size_t  pn = 0;
+    // PartSetHeader is non-nullable in CanonicalBlockID -- always emit field 2.
+    uint8_t pth[40];
+    size_t  pn = 0;
+    if (r->parts_total != 0) {
         pn += pb_write_varint_field(pth + pn, 1, r->parts_total);
-        if (r->parts_hash_len > 0) {
-            pn += pb_write_bytes(pth + pn, 2, r->parts_hash, r->parts_hash_len);
-        }
-        in += pb_write_bytes(inner + in, 2, pth, pn);
     }
+    if (r->parts_hash_len > 0) {
+        pn += pb_write_bytes(pth + pn, 2, r->parts_hash, r->parts_hash_len);
+    }
+    in += pb_write_bytes(inner + in, 2, pth, pn);
     return pb_write_bytes(buf, 4, inner, in);
 }
 
+// Mirror cometbft's BlockID.IsZero() (empty hash + total=0 + empty parts hash).
+// CometBFT's CanonicalizeBlockID returns nil for a zero BlockID, which makes
+// field 4 of CanonicalVote / field 5 of CanonicalProposal disappear entirely
+// from the sign bytes. We must do the same or signatures over nil-votes won't
+// verify. Nil-votes are routine in BFT consensus (e.g. prevote-nil when there
+// is no proposal in the current round).
+static bool block_id_is_zero(const sign_request_t *r) {
+    return r->block_hash_len == 0
+        && r->parts_total   == 0
+        && r->parts_hash_len == 0;
+}
+
+// CanonicalVote. CometBFT's gogoproto MarshalToSizedBuffer wraps every
+// scalar field in `if m.X != 0`, so we MUST do the same or sign-bytes for
+// any vote where one of those is zero (e.g. round=0, which is every first
+// round) will differ from cometbft's. Timestamp is always emitted (field
+// is non-nullable in proto); chain_id is omitted when empty.
 static size_t encode_canonical_vote(uint8_t *buf, const sign_request_t *r) {
     size_t n = 0;
-    n += pb_write_varint_field(buf + n, 1, (uint64_t)r->type);
-    n += write_sfixed64_field (buf + n, 2, (uint64_t)r->height);
-    n += write_sfixed64_field (buf + n, 3, (uint64_t)(int64_t)r->round);
-    if (r->has_block_id) {
+    if (r->type != 0) {
+        n += pb_write_varint_field(buf + n, 1, (uint64_t)r->type);
+    }
+    if (r->height != 0) {
+        n += write_sfixed64_field(buf + n, 2, (uint64_t)r->height);
+    }
+    if (r->round != 0) {
+        n += write_sfixed64_field(buf + n, 3, (uint64_t)(int64_t)r->round);
+    }
+    if (r->has_block_id && !block_id_is_zero(r)) {
         n += encode_canonical_block_id(buf + n, r);
     }
-    if (r->has_timestamp) {
+    // Timestamp is nullable=false in CanonicalVote -- always emit.
+    // Inside, each scalar field is omitted when its value is 0.
+    {
         uint8_t ts[20];
         size_t  tn = 0;
-        tn += pb_write_varint_field(ts + tn, 1, (uint64_t)r->ts_seconds);
-        tn += pb_write_varint_field(ts + tn, 2, (uint64_t)(int64_t)r->ts_nanos);
+        if (r->ts_seconds != 0) {
+            tn += pb_write_varint_field(ts + tn, 1, (uint64_t)r->ts_seconds);
+        }
+        if (r->ts_nanos != 0) {
+            tn += pb_write_varint_field(ts + tn, 2, (uint64_t)(int64_t)r->ts_nanos);
+        }
         n += pb_write_bytes(buf + n, 5, ts, tn);
     }
-    n += pb_write_bytes(buf + n, 6,
-                        (const uint8_t *)r->chain_id, strlen(r->chain_id));
+    size_t chain_id_len = strlen(r->chain_id);
+    if (chain_id_len > 0) {
+        n += pb_write_bytes(buf + n, 6,
+                            (const uint8_t *)r->chain_id, chain_id_len);
+    }
     return n;
 }
 
 // CanonicalProposal field numbering:
 //   1 type, 2 height (sfixed64), 3 round (sfixed64), 4 pol_round (sfixed64),
 //   5 block_id, 6 timestamp, 7 chain_id.
+// CanonicalProposal. Same proto3-zero-omission contract as CanonicalVote.
+// Field numbering: 1 type, 2 height, 3 round, 4 pol_round, 5 block_id,
+// 6 timestamp, 7 chain_id. Timestamp is non-nullable -> always emit.
+//
+// Note pol_round is sfixed64; for the common "no POL" case its WIRE value
+// is -1 (not 0), and gogoproto's `if m.PolRound != 0` test still passes,
+// so we still emit. Only literal 0 is omitted.
 static size_t encode_canonical_proposal(uint8_t *buf, const sign_request_t *r) {
     size_t n = 0;
-    n += pb_write_varint_field(buf + n, 1, (uint64_t)r->type);
-    n += write_sfixed64_field (buf + n, 2, (uint64_t)r->height);
-    n += write_sfixed64_field (buf + n, 3, (uint64_t)(int64_t)r->round);
-    n += write_sfixed64_field (buf + n, 4, (uint64_t)(int64_t)r->pol_round);
-    if (r->has_block_id) {
+    if (r->type != 0) {
+        n += pb_write_varint_field(buf + n, 1, (uint64_t)r->type);
+    }
+    if (r->height != 0) {
+        n += write_sfixed64_field(buf + n, 2, (uint64_t)r->height);
+    }
+    if (r->round != 0) {
+        n += write_sfixed64_field(buf + n, 3, (uint64_t)(int64_t)r->round);
+    }
+    if (r->pol_round != 0) {
+        n += write_sfixed64_field(buf + n, 4, (uint64_t)(int64_t)r->pol_round);
+    }
+    if (r->has_block_id && !block_id_is_zero(r)) {
         uint8_t inner[80];
         size_t  in = 0;
         if (r->block_hash_len > 0) {
             in += pb_write_bytes(inner + in, 1, r->block_hash, r->block_hash_len);
         }
-        if (r->has_parts_header) {
-            uint8_t pth[40];
-            size_t  pn = 0;
+        uint8_t pth[40];
+        size_t  pn = 0;
+        if (r->parts_total != 0) {
             pn += pb_write_varint_field(pth + pn, 1, r->parts_total);
-            if (r->parts_hash_len > 0) {
-                pn += pb_write_bytes(pth + pn, 2, r->parts_hash, r->parts_hash_len);
-            }
-            in += pb_write_bytes(inner + in, 2, pth, pn);
         }
+        if (r->parts_hash_len > 0) {
+            pn += pb_write_bytes(pth + pn, 2, r->parts_hash, r->parts_hash_len);
+        }
+        in += pb_write_bytes(inner + in, 2, pth, pn);
         n += pb_write_bytes(buf + n, 5, inner, in);
     }
-    if (r->has_timestamp) {
+    {
         uint8_t ts[20];
         size_t  tn = 0;
-        tn += pb_write_varint_field(ts + tn, 1, (uint64_t)r->ts_seconds);
-        tn += pb_write_varint_field(ts + tn, 2, (uint64_t)(int64_t)r->ts_nanos);
+        if (r->ts_seconds != 0) {
+            tn += pb_write_varint_field(ts + tn, 1, (uint64_t)r->ts_seconds);
+        }
+        if (r->ts_nanos != 0) {
+            tn += pb_write_varint_field(ts + tn, 2, (uint64_t)(int64_t)r->ts_nanos);
+        }
         n += pb_write_bytes(buf + n, 6, ts, tn);
     }
-    n += pb_write_bytes(buf + n, 7,
-                        (const uint8_t *)r->chain_id, strlen(r->chain_id));
+    size_t chain_id_len = strlen(r->chain_id);
+    if (chain_id_len > 0) {
+        n += pb_write_bytes(buf + n, 7,
+                            (const uint8_t *)r->chain_id, chain_id_len);
+    }
     return n;
 }
 
