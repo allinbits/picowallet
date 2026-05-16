@@ -21,7 +21,7 @@
 #define PHASE_LEN       0
 #define PHASE_BODY      1
 
-static void state_reset(privval_state_t *st) {
+static void state_reset_framing(privval_state_t *st) {
     st->phase     = PHASE_LEN;
     st->len_value = 0;
     st->len_shift = 0;
@@ -609,7 +609,7 @@ static size_t encode_canonical_proposal(uint8_t *buf, const sign_request_t *r) {
 // Per-message-type dispatch
 // ===========================================================================
 
-static void handle_sign_vote(privval_sink_t *sink,
+static void handle_sign_vote(privval_state_t *st, privval_sink_t *sink,
                              const uint8_t *inner, size_t inner_len) {
     sign_request_t r;
     if (decode_sign_request_with(inner, inner_len, &r,
@@ -623,6 +623,15 @@ static void handle_sign_vote(privval_sink_t *sink,
     snprintf(log, sizeof(log), "vote: t=%d h=%lld r=%d",
              (int)r.type, (long long)r.height, (int)r.round);
     os_console_log(log);
+
+    if (strcmp(r.chain_id, st->expected_chain_id) != 0) {
+        char m[96];
+        snprintf(m, sizeof(m), "vote: chain_id_mismatch got=%.32s want=%.32s",
+                 r.chain_id, st->expected_chain_id);
+        os_console_log(m);
+        send_error_in(sink, 4, 2, "chain_id_mismatch");
+        return;
+    }
 
     if (!hwm_advance(r.chain_id, strlen(r.chain_id),
                      r.type, r.height, r.round)) {
@@ -673,7 +682,7 @@ static void handle_sign_vote(privval_sink_t *sink,
     os_console_log("vote: SIGNED");
 }
 
-static void handle_sign_proposal(privval_sink_t *sink,
+static void handle_sign_proposal(privval_state_t *st, privval_sink_t *sink,
                                  const uint8_t *inner, size_t inner_len) {
     sign_request_t r;
     if (decode_sign_request_with(inner, inner_len, &r,
@@ -687,6 +696,15 @@ static void handle_sign_proposal(privval_sink_t *sink,
     snprintf(log, sizeof(log), "prop: t=%d h=%lld r=%d pol=%d",
              (int)r.type, (long long)r.height, (int)r.round, (int)r.pol_round);
     os_console_log(log);
+
+    if (strcmp(r.chain_id, st->expected_chain_id) != 0) {
+        char m[96];
+        snprintf(m, sizeof(m), "prop: chain_id_mismatch got=%.32s want=%.32s",
+                 r.chain_id, st->expected_chain_id);
+        os_console_log(m);
+        send_error_in(sink, 6, 2, "chain_id_mismatch");
+        return;
+    }
 
     if (!hwm_advance(r.chain_id, strlen(r.chain_id),
                      r.type, r.height, r.round)) {
@@ -772,10 +790,10 @@ static void handle_frame(privval_state_t *st, privval_sink_t *sink) {
             send_pubkey_response(sink);
             break;
         case 3:  // SignVoteRequest
-            handle_sign_vote(sink, inner, inner_len);
+            handle_sign_vote(st, sink, inner, inner_len);
             break;
         case 5:  // SignProposalRequest
-            handle_sign_proposal(sink, inner, inner_len);
+            handle_sign_proposal(st, sink, inner, inner_len);
             break;
         case 7:  // PingRequest
             send_ping_response(sink);
@@ -789,8 +807,13 @@ static void handle_frame(privval_state_t *st, privval_sink_t *sink) {
 // ---- Public API used by the cosmos SC driver (apps/cosmos/sc_driver_cosmos.c).
 // State is caller-owned, so concurrent privval sessions are supported.
 
-void privval_reset_state(privval_state_t *st) {
-    state_reset(st);
+void privval_reset_state(privval_state_t *st, const char *expected_chain_id) {
+    state_reset_framing(st);
+    memset(st->expected_chain_id, 0, sizeof(st->expected_chain_id));
+    if (expected_chain_id) {
+        strncpy(st->expected_chain_id, expected_chain_id,
+                sizeof(st->expected_chain_id) - 1);
+    }
 }
 
 // Feed a single byte into the frame state machine.
@@ -808,7 +831,7 @@ int privval_feed_byte(privval_state_t *st, privval_sink_t *sink, uint8_t b) {
             // empty frames are legal (e.g., PingRequest may serialize to 0 bytes)
             if (st->body_len == 0) {
                 handle_frame(st, sink);
-                state_reset(st);
+                state_reset_framing(st);
                 return 0;
             }
             st->phase = PHASE_BODY;
@@ -819,7 +842,7 @@ int privval_feed_byte(privval_state_t *st, privval_sink_t *sink, uint8_t b) {
     st->body[st->body_pos++] = b;
     if (st->body_pos == st->body_len) {
         handle_frame(st, sink);
-        state_reset(st);
+        state_reset_framing(st);
     }
     return 0;
 }

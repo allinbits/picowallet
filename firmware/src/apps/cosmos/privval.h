@@ -10,7 +10,8 @@
 // Parser state lives in caller-owned storage (one per connection) so the
 // driver can host multiple concurrent privval sessions.
 
-#define PRIVVAL_FRAME_MAX  4096  // generous cap on a single privval message
+#define PRIVVAL_FRAME_MAX        4096  // generous cap on a single privval message
+#define PRIVVAL_CHAIN_ID_MAX     48    // matches CHAINS_CHAIN_ID_MAX
 
 typedef struct {
     int      phase;      // PHASE_LEN (0) or PHASE_BODY (1)
@@ -19,6 +20,10 @@ typedef struct {
     uint8_t  body[PRIVVAL_FRAME_MAX];
     size_t   body_len;
     size_t   body_pos;
+    // The chain_id this connection is bound to (from the chain slot config).
+    // Sign requests whose canonical bytes claim a different chain_id are
+    // refused with a remote-signer error.
+    char     expected_chain_id[PRIVVAL_CHAIN_ID_MAX];
 } privval_state_t;
 
 typedef struct {
@@ -30,10 +35,10 @@ typedef struct {
     void *ctx;
 } privval_sink_t;
 
-// Reset a parser to expect a fresh uvarint length prefix. Call at the
-// start of each new connection (or after each completed frame for parsers
-// that prefer explicit reset).
-void privval_reset_state(privval_state_t *st);
+// Reset a parser to expect a fresh uvarint length prefix and bind it to
+// `expected_chain_id`. Call once per new connection. May be passed NULL
+// to reset framing only (sign requests will then fail the chain_id check).
+void privval_reset_state(privval_state_t *st, const char *expected_chain_id);
 
 // Push a single byte through the parser. Returns 0 if all is well, -1 if
 // the connection should be closed (malformed/oversize frame).

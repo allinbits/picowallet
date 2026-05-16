@@ -196,6 +196,21 @@ static int advance(gno_chain_t *c) {
                 if (!resp_len) return -1;
                 goto emit_response;
             }
+            // Strict chain_id binding: the slot is the ground truth.
+            size_t expected_len = strlen(c->slot->chain_id);
+            if (chain_id_len != expected_len
+                || memcmp(chain_id, c->slot->chain_id, chain_id_len) != 0) {
+                char m[96];
+                int cid_show = (int)(chain_id_len > 24 ? 24 : chain_id_len);
+                snprintf(m, sizeof(m),
+                         "gno-sc[%s]: chain_id_mismatch got=%.*s",
+                         c->slot->label, cid_show, chain_id);
+                os_console_log(m);
+                resp_len = gno_privval_encode_sign_response_error(
+                    "chain_id_mismatch", resp_plain, sizeof(resp_plain));
+                if (!resp_len) return -1;
+                goto emit_response;
+            }
             if (!hwm_advance(chain_id, chain_id_len, type, height, round)) {
                 char log[96];
                 int cid_show = (int)(chain_id_len > 20 ? 20 : chain_id_len);

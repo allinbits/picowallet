@@ -183,7 +183,7 @@ static int advance(cosmos_chain_t *c) {
         char log[64];
         snprintf(log, sizeof(log), "cosmos-sc[%s]: handshake complete", label);
         os_console_log(log);
-        privval_reset_state(&c->parser);
+        privval_reset_state(&c->parser, c->slot->chain_id);
         c->phase   = RX_PRIVVAL;
         c->rx_got  = 0;
         c->rx_need = SC_SEALED_FRAME_SIZE;
