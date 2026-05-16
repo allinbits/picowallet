@@ -24,6 +24,9 @@ typedef struct {
     // Sign requests whose canonical bytes claim a different chain_id are
     // refused with a remote-signer error.
     char     expected_chain_id[PRIVVAL_CHAIN_ID_MAX];
+    // The HWM slot this connection's signs route to (see chains.h /
+    // hwm_flash.h). Used as the slot argument to hwm_advance.
+    uint8_t  hwm_slot_idx;
 } privval_state_t;
 
 typedef struct {
@@ -35,10 +38,14 @@ typedef struct {
     void *ctx;
 } privval_sink_t;
 
-// Reset a parser to expect a fresh uvarint length prefix and bind it to
-// `expected_chain_id`. Call once per new connection. May be passed NULL
-// to reset framing only (sign requests will then fail the chain_id check).
-void privval_reset_state(privval_state_t *st, const char *expected_chain_id);
+// Reset a parser to expect a fresh uvarint length prefix and bind it to a
+// chain slot. The expected_chain_id is the slot's bound chain_id (sign
+// requests claiming a different one are refused). hwm_slot_idx identifies
+// the HWM region used for double-sign protection. Call once per new
+// connection.
+void privval_reset_state(privval_state_t *st,
+                         const char *expected_chain_id,
+                         uint8_t hwm_slot_idx);
 
 // Push a single byte through the parser. Returns 0 if all is well, -1 if
 // the connection should be closed (malformed/oversize frame).

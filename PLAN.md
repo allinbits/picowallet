@@ -162,10 +162,11 @@ Reboot to switch.
           │   • label / chain_id / host / port    │
           │   • optional pinned peer pubkey       │
 0x300000  ├──────────────────────────────────────┤
-          │  HWM rolling log (1 MB / 256 sectors) │
-          │   • 16 records × 256 B per sector     │
-          │   • each record: chain_id + h/r/t     │
-          │   • compaction-on-wrap, sector-rolls  │
+          │  HWM (1 MB) — 16 per-chain regions    │
+          │   • 16 contiguous sectors per slot    │
+          │   • 64 records × 64 B per sector      │
+          │   • rolling log within each region    │
+          │   • no compaction (chain_id implicit) │
 0x400000  └──────────────────────────────────────┘
 ```
 
@@ -240,13 +241,9 @@ Phase ✓ = completed (verified end-to-end). Phase ◯ = open.
 ### ✓ M5b — Per-chain HWM + multi-sector wear leveling
 
 - HWM keyed by `(chain_id, …)` instead of global per-key
-- 256-sector rolling-log flash storage (1 MB)
-- Compaction on sector advance; no separate sector-pointer record needed
-  (boot scan finds active sector via max seq)
-- Lifetime at flash spec minimum:
-  - 1 chain: ~35 years
-  - 8 chains: ~2.3 years
-  - Real-world flash typically 2–5× the spec → multiply accordingly
+- Originally a shared 256-sector rolling log (1 MB) with compaction on
+  sector advance. Redesigned in M8 into 16 dedicated per-slot regions
+  (see §M8 last bullet).
 
 ### ✓ M5c — Peer pubkey allowlist (superseded by M8 per-chain pinning)
 
@@ -325,8 +322,17 @@ chain B.
   `chain_id_mismatch` if the canonical bytes don't match the slot's
   chain_id, even with a successful SC handshake.
 - ✓ Per-slot peer pinning replaces the flat allowlist (M5c).
-- ◯ HWM still capped at 8 simultaneous chain_ids; bumping to 16
-  requires record-packing changes (see TODO in `hwm_flash.h`).
+- ✓ HWM rearchitected to per-slot dedicated regions. 1 MB partitioned
+  into 16 × 64 KB regions (one per chain slot, mapped via
+  `chains_hwm_slot_idx`). 64-byte records (4 per flash page via
+  sub-page programming), 64 records per sector, 16 sectors per region.
+  No compaction (chain_id is implicit by region; an 8-byte hash field
+  rides along as a sanity check). Wear is isolated per chain.
+  `chains_add` wipes the region before assigning a slot to a new
+  chain_id. Endurance at spec-min 100K cycles: 100K × 16 sectors × 64
+  records = 102M signs per chain → ~9.3 years at 0.35 signs/sec,
+  regardless of how many other chains are configured (real flash 2-5×
+  → 20-45y in practice).
 
 ### ◯ M9 — TrustZone split
 

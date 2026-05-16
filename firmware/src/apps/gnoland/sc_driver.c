@@ -37,6 +37,7 @@ typedef enum {
 
 typedef struct gno_chain {
     const chain_slot_t *slot;       // NULL if this index is unconfigured
+    uint8_t             hwm_slot_idx;
     struct tcp_pcb     *lpcb;       // listening pcb (bound at init)
 
     // Active connection (one at a time per slot; gno validators dial in
@@ -220,7 +221,8 @@ static int advance(gno_chain_t *c) {
                 if (!resp_len) return -1;
                 goto emit_response;
             }
-            if (!hwm_advance(chain_id, chain_id_len, type, height, round)) {
+            if (!hwm_advance(c->hwm_slot_idx, chain_id, chain_id_len,
+                             type, height, round)) {
                 char log[96];
                 int cid_show = (int)(chain_id_len > 20 ? 20 : chain_id_len);
                 snprintf(log, sizeof(log),
@@ -376,8 +378,9 @@ void gno_sc_driver_init(void) {
             os_console_log(log);
             continue;
         }
-        g_chains[i].slot = slot;
-        g_chains[i].lpcb = lpcb;
+        g_chains[i].slot         = slot;
+        g_chains[i].hwm_slot_idx = chains_hwm_slot_idx(CHAINS_FAMILY_GNO, i);
+        g_chains[i].lpcb         = lpcb;
         tcp_arg(lpcb,    &g_chains[i]);
         tcp_accept(lpcb, on_accept);
         configured++;

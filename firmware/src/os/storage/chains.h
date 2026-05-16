@@ -72,3 +72,12 @@ bool chains_remove(chains_family_t fam, const char *label);
 
 // Wipe all slots in both families and persist the empty table.
 void chains_wipe(void);
+
+// HWM-slot mapping. Each chain config slot owns one slot in the HWM
+// region (see os/storage/hwm_flash.h). The mapping is implicit:
+//
+//   cosmos[i] -> HWM slot i              (i in 0..CHAINS_MAX_PER_FAMILY-1)
+//   gno[i]    -> HWM slot CHAINS_MAX_PER_FAMILY + i
+//
+// Callers pass this index to hwm_advance / hwm_current.
+uint8_t chains_hwm_slot_idx(chains_family_t fam, size_t family_slot_idx);

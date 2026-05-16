@@ -633,7 +633,7 @@ static void handle_sign_vote(privval_state_t *st, privval_sink_t *sink,
         return;
     }
 
-    if (!hwm_advance(r.chain_id, strlen(r.chain_id),
+    if (!hwm_advance(st->hwm_slot_idx, r.chain_id, strlen(r.chain_id),
                      r.type, r.height, r.round)) {
         os_console_log("vote: HWM reject (double-sign)");
         send_error_in(sink, 4, 2, "double_sign_refused");
@@ -706,7 +706,7 @@ static void handle_sign_proposal(privval_state_t *st, privval_sink_t *sink,
         return;
     }
 
-    if (!hwm_advance(r.chain_id, strlen(r.chain_id),
+    if (!hwm_advance(st->hwm_slot_idx, r.chain_id, strlen(r.chain_id),
                      r.type, r.height, r.round)) {
         os_console_log("prop: HWM reject (double-sign)");
         send_error_in(sink, 6, 2, "double_sign_refused");
@@ -807,13 +807,16 @@ static void handle_frame(privval_state_t *st, privval_sink_t *sink) {
 // ---- Public API used by the cosmos SC driver (apps/cosmos/sc_driver_cosmos.c).
 // State is caller-owned, so concurrent privval sessions are supported.
 
-void privval_reset_state(privval_state_t *st, const char *expected_chain_id) {
+void privval_reset_state(privval_state_t *st,
+                         const char *expected_chain_id,
+                         uint8_t hwm_slot_idx) {
     state_reset_framing(st);
     memset(st->expected_chain_id, 0, sizeof(st->expected_chain_id));
     if (expected_chain_id) {
         strncpy(st->expected_chain_id, expected_chain_id,
                 sizeof(st->expected_chain_id) - 1);
     }
+    st->hwm_slot_idx = hwm_slot_idx;
 }
 
 // Feed a single byte into the frame state machine.

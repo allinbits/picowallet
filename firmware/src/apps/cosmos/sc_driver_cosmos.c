@@ -42,6 +42,7 @@ typedef enum {
 
 typedef struct cosmos_chain {
     const chain_slot_t *slot;       // NULL if this index is unconfigured
+    uint8_t             hwm_slot_idx;
 
     // Dial FSM
     bool                dial_in_flight;
@@ -192,7 +193,7 @@ static int advance(cosmos_chain_t *c) {
         char log[64];
         snprintf(log, sizeof(log), "cosmos-sc[%s]: handshake complete", label);
         os_console_log(log);
-        privval_reset_state(&c->parser, c->slot->chain_id);
+        privval_reset_state(&c->parser, c->slot->chain_id, c->hwm_slot_idx);
         c->phase   = RX_PRIVVAL;
         c->rx_got  = 0;
         c->rx_need = SC_SEALED_FRAME_SIZE;
@@ -376,6 +377,7 @@ void cosmos_sc_driver_init(void) {
         const chain_slot_t *slot = chains_get(CHAINS_FAMILY_COSMOS, i);
         if (!slot->in_use) continue;
         g_chains[i].slot         = slot;
+        g_chains[i].hwm_slot_idx = chains_hwm_slot_idx(CHAINS_FAMILY_COSMOS, i);
         g_chains[i].next_dial_at = get_absolute_time();   // first dial gated by USB-ready
         configured++;
     }

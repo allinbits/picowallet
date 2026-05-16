@@ -6,6 +6,7 @@
 
 #include "os/storage/chains.h"
 #include "os/storage/flash_layout.h"
+#include "os/storage/hwm_flash.h"
 
 // Single-sector erase-and-rewrite layout. Admin operations are rare (operator
 // edits config via TMKMS-mode REPL), so even at one rewrite/day the 100K-cycle
@@ -143,6 +144,10 @@ int chains_add(chains_family_t fam,
         memcpy(s->pinned_key, pinned_key, CHAINS_PUBKEY_LEN);
     }
     persist();
+    // Wipe this slot's HWM region so a previously-assigned chain's
+    // state cannot leak into the new chain (height collision could
+    // wedge signing or, worse, mask a legitimate double-sign).
+    hwm_wipe_slot(chains_hwm_slot_idx(fam, (size_t)free_idx));
     return 0;
 }
 
@@ -162,4 +167,9 @@ void chains_wipe(void) {
     memset(s_cosmos, 0, sizeof(s_cosmos));
     memset(s_gno,    0, sizeof(s_gno));
     persist();
+}
+
+uint8_t chains_hwm_slot_idx(chains_family_t fam, size_t family_slot_idx) {
+    return (uint8_t)((fam == CHAINS_FAMILY_COSMOS ? 0u : CHAINS_MAX_PER_FAMILY)
+                     + family_slot_idx);
 }
