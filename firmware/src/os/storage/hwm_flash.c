@@ -204,9 +204,27 @@ static void advance_sector(void) {
     s_next_slot  = slot;
 }
 
+// Map the raw cometbft/gno SignedMsgType to the BFT step ordering.
+// Within a single (height, round) the consensus protocol signs in this
+// order: propose, then prevote, then precommit. The raw type values
+// (Proposal=0x20, Prevote=0x01, Precommit=0x02) are NOT monotonic in that
+// order, so we must translate before checking strict-increase or every
+// (Proposal -> Prevote) transition would be rejected as a double-sign.
+static int type_to_step(int32_t t) {
+    switch (t) {
+        case 0x20: return 1;   // Proposal
+        case 0x01: return 2;   // Prevote
+        case 0x02: return 3;   // Precommit
+        default:   return 0;   // unknown / no prior signing
+    }
+}
+
 bool hwm_advance(const char *chain_id, size_t chain_id_len,
                  int32_t type, int64_t height, int32_t round) {
     if (chain_id_len == 0 || chain_id_len > HWM_CHAIN_ID_MAX) return false;
+
+    int new_step = type_to_step(type);
+    if (new_step == 0) return false;   // reject unrecognized message types
 
     hwm_cache_t *c = cache_get_or_alloc(chain_id, chain_id_len);
     if (!c) return false;
@@ -215,7 +233,7 @@ bool hwm_advance(const char *chain_id, size_t chain_id_len,
     if (height > c->state.height) goto ok;
     if (round  < c->state.round)  return false;
     if (round  > c->state.round)  goto ok;
-    if (type   <= c->state.type)  return false;
+    if (new_step <= type_to_step(c->state.type)) return false;
 ok: ;
 
     hwm_state_t new_state = { .height = height, .round = round, .type = type };
