@@ -22,7 +22,7 @@
 #include "apps/gnoland/sc_driver.h"
 #include "os/api.h"
 #include "os/storage/hwm_flash.h"
-#include "os/storage/auth_keys.h"
+#include "os/storage/chains.h"
 
 #define LED_PIN PICO_DEFAULT_LED_PIN
 
@@ -49,7 +49,7 @@ int main(void) {
 
     if (os_current_mode == OS_MODE_PRIVVAL) {
         hwm_init();             // shared per-chain HWM cache across signing apps
-        auth_keys_init();       // peer pubkey allowlist (default: permissive)
+        chains_init();          // per-chain config (dial targets, listen ports, pinned keys)
         eth_init();
 
         // Log the consensus pubkey so it can be reconciled against the

@@ -19,7 +19,7 @@
 #include "apps/cosmos/secret_connection_cosmos.h"
 #include "apps/cosmos/privval.h"
 #include "os/api.h"
-#include "os/storage/auth_keys.h"
+#include "os/storage/chains.h"
 
 #define VALIDATOR_KEY_PATH "m/0'"
 
@@ -149,9 +149,9 @@ static int advance(struct tcp_pcb *pcb) {
             os_console_log(buf);
             return -1;
         }
-        if (auth_keys_count() == 0) {
+        if (chains_pinned_count() == 0) {
             os_console_log("cosmos-sc: WARN no pinned peer keys (permissive)");
-        } else if (!auth_keys_check(g_state.handshake.rem_pub)) {
+        } else if (!chains_pinned_check(g_state.handshake.rem_pub)) {
             os_console_log("cosmos-sc: peer pubkey not in allowlist; closing");
             return -1;
         }

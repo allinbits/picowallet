@@ -47,7 +47,7 @@ add_executable(picowallet
     src/os/crypto/strobe.c
     src/os/crypto/merlin.c
     src/os/storage/hwm_flash.c
-    src/os/storage/auth_keys.c
+    src/os/storage/chains.c
 
     # Validator apps (one per chain family)
     src/apps/cosmos/app.c

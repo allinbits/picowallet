@@ -22,7 +22,7 @@
 #include "apps/gnoland/gno_privval.h"
 #include "os/api.h"
 #include "os/storage/hwm_flash.h"
-#include "os/storage/auth_keys.h"
+#include "os/storage/chains.h"
 
 #define VALIDATOR_KEY_PATH "m/0'"
 
@@ -130,9 +130,9 @@ static int advance(struct tcp_pcb *pcb) {
         // Peer pubkey pinning: if any keys are configured, the peer must
         // match; otherwise we run permissive and log a warning so operators
         // notice they're unpinned.
-        if (auth_keys_count() == 0) {
+        if (chains_pinned_count() == 0) {
             os_console_log("gno-sc: WARN no pinned peer keys (permissive)");
-        } else if (!auth_keys_check(g_state.handshake.rem_pub)) {
+        } else if (!chains_pinned_check(g_state.handshake.rem_pub)) {
             os_console_log("gno-sc: peer pubkey not in allowlist; closing");
             return -1;
         }

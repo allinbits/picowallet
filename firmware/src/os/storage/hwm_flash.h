@@ -16,6 +16,18 @@
 // to the next slot; when wrapping to slot 0 we first compact (one record
 // per live chain) into the freshly-erased sector so no chain's state is lost.
 
+// Operators can configure up to 8 cosmos + 8 gno chain slots (see
+// os/storage/chains.h), so up to 16 distinct chain_ids could ever sign on
+// this device. HWM only tracks chains that have actually requested a sign;
+// going above 8 simultaneously-active chains hits a wear-leveling cliff in
+// advance_sector() (compaction fills the freshly-erased sector and every
+// subsequent sign forces another erase). The 9th simultaneous chain_id is
+// refused with a "table full" return from hwm_advance(), which the SC
+// drivers surface as a sign error -- safe, but the operator should retire
+// inactive chains before adding new ones.
+//
+// TODO: lift this to 16 by halving the on-flash record size (sub-page
+// programming) or splitting HWM into per-family halves.
 #define HWM_MAX_CHAINS         8u
 #define HWM_CHAIN_ID_MAX       64u
 

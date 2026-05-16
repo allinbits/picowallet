@@ -6,12 +6,12 @@
 // the firmware image and future growth.
 //
 // Layout (Pico 2: 4 MB):
-//   [ firmware ][ ... unused ... ][ AUTH_KEYS (4 KB) ][ HWM (1 MB) ]
-//                                  ^                   ^           ^
-//                                  AUTH_KEYS_FLASH_OFFSET           PICO_FLASH_SIZE_BYTES
+//   [ firmware ][ ... unused ... ][ CHAINS (4 KB) ][ HWM (1 MB) ]
+//                                  ^                ^           ^
+//                                  CHAINS_FLASH_OFFSET           PICO_FLASH_SIZE_BYTES
 
-#define HWM_FLASH_SIZE            (1024u * 1024u)
-#define HWM_FLASH_OFFSET          (PICO_FLASH_SIZE_BYTES - HWM_FLASH_SIZE)
+#define HWM_FLASH_SIZE        (1024u * 1024u)
+#define HWM_FLASH_OFFSET      (PICO_FLASH_SIZE_BYTES - HWM_FLASH_SIZE)
 
-#define AUTH_KEYS_FLASH_SIZE      4096u
-#define AUTH_KEYS_FLASH_OFFSET    (HWM_FLASH_OFFSET - AUTH_KEYS_FLASH_SIZE)
+#define CHAINS_FLASH_SIZE     4096u
+#define CHAINS_FLASH_OFFSET   (HWM_FLASH_OFFSET - CHAINS_FLASH_SIZE)

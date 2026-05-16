@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -14,7 +15,7 @@
 #include "os/bench.h"
 #include "os/crypto/keystore.h"
 #include "os/mode.h"
-#include "os/storage/auth_keys.h"
+#include "os/storage/chains.h"
 #include "os/storage/hwm_flash.h"
 
 #define LED_PIN PICO_DEFAULT_LED_PIN
@@ -138,44 +139,129 @@ static int dispatch_os(const char *cmd, const char *args,
                  input_pressed(INPUT_BTN_RIGHT));
         return 0;
     }
-    if (strcmp(cmd, "auth_list") == 0) {
-        size_t n = auth_keys_count();
-        if (n == 0) {
-            snprintf(reply, reply_size, "0 (permissive)");
+    // ---- Per-chain config: os.{cosmos,gno}.chain.{add,remove,list}, os.chain.wipe
+    if (strcmp(cmd, "cosmos.chain.add") == 0
+        || strcmp(cmd, "gno.chain.add") == 0) {
+        bool is_cosmos = (cmd[0] == 'c');
+        chains_family_t fam = is_cosmos ? CHAINS_FAMILY_COSMOS : CHAINS_FAMILY_GNO;
+        // args: cosmos -> "LABEL CHAIN_ID HOST PORT [PUBKEY_HEX]"
+        //       gno    -> "LABEL CHAIN_ID PORT [PUBKEY_HEX]"
+        char buf[256];
+        strncpy(buf, args, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        char *saveptr = NULL;
+        char *label_s    = strtok_r(buf,  " ", &saveptr);
+        char *chain_id_s = strtok_r(NULL, " ", &saveptr);
+        char *host_s     = is_cosmos ? strtok_r(NULL, " ", &saveptr) : NULL;
+        char *port_s     = strtok_r(NULL, " ", &saveptr);
+        char *pubkey_s   = strtok_r(NULL, " ", &saveptr);
+        if (!label_s || !chain_id_s || !port_s
+            || (is_cosmos && !host_s)) {
+            snprintf(reply, reply_size,
+                     is_cosmos
+                       ? "usage: os.cosmos.chain.add <label> <chain_id> <host> <port> [<pubkey_hex>]"
+                       : "usage: os.gno.chain.add <label> <chain_id> <port> [<pubkey_hex>]");
+            return -1;
+        }
+        // Parse port
+        unsigned long port_ul = strtoul(port_s, NULL, 10);
+        if (port_ul == 0 || port_ul > 65535) {
+            snprintf(reply, reply_size, "bad_port: %s", port_s);
+            return -1;
+        }
+        // Parse host (cosmos only)
+        uint8_t host_bytes[4] = {0};
+        if (is_cosmos) {
+            unsigned a, b, c, d;
+            if (sscanf(host_s, "%u.%u.%u.%u", &a, &b, &c, &d) != 4
+                || a > 255 || b > 255 || c > 255 || d > 255) {
+                snprintf(reply, reply_size, "bad_host: %s", host_s);
+                return -1;
+            }
+            host_bytes[0] = (uint8_t)a; host_bytes[1] = (uint8_t)b;
+            host_bytes[2] = (uint8_t)c; host_bytes[3] = (uint8_t)d;
+        }
+        // Parse optional pubkey
+        uint8_t pubkey[CHAINS_PUBKEY_LEN];
+        const uint8_t *pubkey_ptr = NULL;
+        if (pubkey_s) {
+            size_t pk_len = 0;
+            if (hex_decode(pubkey_s, pubkey, sizeof(pubkey), &pk_len) != 0
+                || pk_len != CHAINS_PUBKEY_LEN) {
+                snprintf(reply, reply_size, "bad_pubkey (expected 64 hex chars)");
+                return -1;
+            }
+            pubkey_ptr = pubkey;
+        }
+        int rc = chains_add(fam, label_s, chain_id_s,
+                            is_cosmos ? host_bytes : NULL,
+                            (uint16_t)port_ul, pubkey_ptr);
+        if (rc == 0) {
+            snprintf(reply, reply_size, "added");
             return 0;
         }
-        size_t pos = 0;
-        int wrote = snprintf(reply + pos, reply_size - pos, "%zu", n);
-        if (wrote < 0) return -1;
-        pos += (size_t)wrote;
-        for (size_t i = 0; i < n && pos + 66 < reply_size; i++) {
-            uint8_t pk[AUTH_KEYS_PUBKEY_LEN];
-            if (!auth_keys_get(i, pk)) break;
-            reply[pos++] = ' ';
-            hex_encode(pk, AUTH_KEYS_PUBKEY_LEN, reply + pos);
-            pos += AUTH_KEYS_PUBKEY_LEN * 2;
-        }
-        return 0;
+        snprintf(reply, reply_size,
+                 rc == -1 ? "table_full" :
+                 rc == -2 ? "duplicate_label" :
+                 rc == -3 ? "duplicate_chain_id" :
+                            "invalid_args");
+        return -1;
     }
-    if (strcmp(cmd, "auth_add") == 0) {
-        uint8_t pk[AUTH_KEYS_PUBKEY_LEN];
-        size_t  pk_len = 0;
-        if (hex_decode(args, pk, sizeof(pk), &pk_len) != 0
-            || pk_len != AUTH_KEYS_PUBKEY_LEN) {
-            snprintf(reply, reply_size, "usage: os.auth_add <64-hex-pubkey>");
+    if (strcmp(cmd, "cosmos.chain.remove") == 0
+        || strcmp(cmd, "gno.chain.remove") == 0) {
+        chains_family_t fam = (cmd[0] == 'c')
+            ? CHAINS_FAMILY_COSMOS : CHAINS_FAMILY_GNO;
+        if (!args || !*args) {
+            snprintf(reply, reply_size, "usage: os.%s.chain.remove <label>",
+                     (cmd[0] == 'c') ? "cosmos" : "gno");
             return -1;
         }
-        if (!auth_keys_add(pk)) {
-            snprintf(reply, reply_size,
-                     "rejected (duplicate, zero, or full)");
+        if (!chains_remove(fam, args)) {
+            snprintf(reply, reply_size, "no_such_label");
             return -1;
         }
-        snprintf(reply, reply_size, "added (now %zu)", auth_keys_count());
+        snprintf(reply, reply_size, "removed");
         return 0;
     }
-    if (strcmp(cmd, "auth_clear") == 0) {
-        auth_keys_clear();
-        snprintf(reply, reply_size, "cleared (back to permissive)");
+    if (strcmp(cmd, "cosmos.chain.list") == 0
+        || strcmp(cmd, "gno.chain.list") == 0) {
+        bool is_cosmos = (cmd[0] == 'c');
+        chains_family_t fam = is_cosmos ? CHAINS_FAMILY_COSMOS : CHAINS_FAMILY_GNO;
+        size_t n = chains_count(fam);
+        // One line per slot directly to CDC; reply summary at the end.
+        // Reply buffer can't hold 8 entries (each is ~150 chars).
+        for (size_t i = 0; i < CHAINS_MAX_PER_FAMILY; i++) {
+            const chain_slot_t *s = chains_get(fam, i);
+            if (!s->in_use) continue;
+            char pin[2 + CHAINS_PUBKEY_LEN * 2 + 1];
+            if (s->has_pinned_key) {
+                pin[0] = ' '; pin[1] = '\0';
+                hex_encode(s->pinned_key, CHAINS_PUBKEY_LEN, pin + 1);
+            } else {
+                pin[0] = '\0';
+            }
+            if (is_cosmos) {
+                usb_cdc_printf("  %s chain_id=%s %u.%u.%u.%u:%u%s%s\r\n",
+                               s->label, s->chain_id,
+                               s->dial_host[0], s->dial_host[1],
+                               s->dial_host[2], s->dial_host[3],
+                               (unsigned)s->port,
+                               s->has_pinned_key ? " pubkey=" : "",
+                               s->has_pinned_key ? pin + 1 : "");
+            } else {
+                usb_cdc_printf("  %s chain_id=%s port=%u%s%s\r\n",
+                               s->label, s->chain_id, (unsigned)s->port,
+                               s->has_pinned_key ? " pubkey=" : "",
+                               s->has_pinned_key ? pin + 1 : "");
+            }
+        }
+        snprintf(reply, reply_size, "%zu %s chain(s)",
+                 n, is_cosmos ? "cosmos" : "gno");
+        return 0;
+    }
+    if (strcmp(cmd, "chain.wipe") == 0) {
+        chains_wipe();
+        snprintf(reply, reply_size, "wiped");
         return 0;
     }
     if (strcmp(cmd, "hwm_wipe") == 0) {
