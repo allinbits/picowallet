@@ -79,8 +79,8 @@ int main(void) {
             }
         }
 
-        gno_sc_driver_init();       // gno SecretConnection            (port 26659)
-        cosmos_sc_driver_init();    // cometbft SecretConnection+Merlin (port 26660)
+        gno_sc_driver_init();       // gno SecretConnection: one listener per gno chain slot
+        cosmos_sc_driver_init();    // cometbft SecretConnection+Merlin: one dialer per cosmos chain slot
     }
 
     int failures = app_registry_init_all();

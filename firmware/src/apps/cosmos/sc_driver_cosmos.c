@@ -1,20 +1,23 @@
-// TCP driver for cometbft's SecretConnection handshake (Merlin variant).
+// TCP dialer for cometbft's SecretConnection handshake (Merlin variant).
 //
-// Mirrors apps/gnoland/sc_driver.c. As with the gno driver, we never
-// tcp_write inside tcp_accept (lwIP returns ERR_MEM in that path); the
-// peer sends first and we respond with our ephemeral + sealed auth back
-// to back from on_recv.
+// One outbound dialer per configured cosmos chain slot
+// (os/storage/chains.h). Each slot owns its own dial FSM, active
+// connection state, privval parser, and sink buffer. Slots run
+// independently so a slow or unresponsive peer on one chain doesn't queue
+// signing for any other chain.
 //
-// Per-connection state is allocated from a small pool and attached to
-// each pcb via tcp_arg, so concurrent SC sessions don't share parser
-// state. The pool size today is 1 (single-target dialer / single-listener
-// behavior unchanged from before); a later commit bumps it alongside
-// per-chain dial-target wiring.
+// With zero cosmos slots configured the driver is dormant: no pcbs
+// allocated, no dial attempts. Slots are read once from the chain config
+// table at init; the operator must reboot to apply changes (chain config
+// is editable only in TMKMS mode).
 
 #include <stdio.h>
 #include <string.h>
 
+#include "pico/time.h"
+#include "tusb.h"
 #include "lwip/tcp.h"
+#include "lwip/ip4_addr.h"
 
 #include "apps/cosmos/sc_driver_cosmos.h"
 #include "apps/cosmos/secret_connection_cosmos.h"
@@ -22,7 +25,13 @@
 #include "os/api.h"
 #include "os/storage/chains.h"
 
-#define VALIDATOR_KEY_PATH "m/0'"
+#define VALIDATOR_KEY_PATH      "m/0'"
+
+#define COSMOS_SC_DIAL_RETRY_MS         3000
+// Settling time after USB enumerates before the first dial. Issuing
+// tcp_connect before tud_ready() + a brief stabilization window wedges the
+// netif on macOS hosts.
+#define COSMOS_SC_DIAL_STABILIZE_TICKS  1000
 
 typedef enum {
     RX_NONE = 0,
@@ -31,53 +40,54 @@ typedef enum {
     RX_PRIVVAL,    // handshake done; reading sealed privval frames
 } rx_phase_t;
 
-typedef struct cosmos_conn {
-    bool             in_use;
-    struct tcp_pcb  *pcb;
-    cosmos_sc_t      handshake;
-    rx_phase_t       phase;
-    uint8_t          val_pub[32];
-    uint8_t          rx_buf[COSMOS_SC_AUTH_SEALED_SIZE];
-    uint16_t         rx_need;
-    uint16_t         rx_got;
-    privval_state_t  parser;
-    uint8_t          sink_buf[SC_DATA_MAX_SIZE];
-    uint16_t         sink_pos;
-} cosmos_conn_t;
+typedef struct cosmos_chain {
+    const chain_slot_t *slot;       // NULL if this index is unconfigured
 
-// Pool of per-connection slots. One is enough for today's single-target
-// behavior; the per-chain dialer/listener work bumps this to match the
-// number of configured chain slots.
-#define COSMOS_CONN_POOL_SIZE  1
-static cosmos_conn_t g_pool[COSMOS_CONN_POOL_SIZE];
+    // Dial FSM
+    bool                dial_in_flight;
+    bool                connected;
+    uint32_t            ready_ticks;
+    absolute_time_t     next_dial_at;
 
-static cosmos_conn_t *conn_alloc(void) {
-    for (size_t i = 0; i < COSMOS_CONN_POOL_SIZE; i++) {
-        if (!g_pool[i].in_use) {
-            memset(&g_pool[i], 0, sizeof(g_pool[i]));
-            g_pool[i].in_use = true;
-            g_pool[i].phase  = RX_NONE;
-            return &g_pool[i];
-        }
-    }
-    return NULL;
+    // Active connection (lives between on_dial_connected and on_recv-close).
+    struct tcp_pcb     *pcb;
+    cosmos_sc_t         handshake;
+    rx_phase_t          phase;
+    uint8_t             val_pub[32];
+    uint8_t             rx_buf[COSMOS_SC_AUTH_SEALED_SIZE];
+    uint16_t            rx_need;
+    uint16_t            rx_got;
+    privval_state_t     parser;
+    uint8_t             sink_buf[SC_DATA_MAX_SIZE];
+    uint16_t            sink_pos;
+} cosmos_chain_t;
+
+// One slot per configurable chain. Index matches chains_get(COSMOS, i).
+static cosmos_chain_t g_chains[CHAINS_MAX_PER_FAMILY];
+
+static void reset_conn_state(cosmos_chain_t *c) {
+    c->pcb            = NULL;
+    c->phase          = RX_NONE;
+    c->rx_need        = 0;
+    c->rx_got         = 0;
+    c->sink_pos       = 0;
+    c->dial_in_flight = false;
+    c->connected      = false;
+    memset(&c->handshake, 0, sizeof(c->handshake));
+    memset(c->rx_buf,     0, sizeof(c->rx_buf));
+    memset(c->sink_buf,   0, sizeof(c->sink_buf));
+    memset(&c->parser,    0, sizeof(c->parser));
 }
 
-static void conn_free(cosmos_conn_t *c) {
-    if (!c) return;
-    memset(c, 0, sizeof(*c));
+static void schedule_retry(cosmos_chain_t *c) {
+    c->next_dial_at = make_timeout_time_ms(COSMOS_SC_DIAL_RETRY_MS);
 }
 
-// Sink that buffers each privval response frame's plaintext and, on flush,
-// seals it into one AEAD-encrypted SC frame before tcp_write'ing it.
-// `ctx` is the per-connection cosmos_conn_t pointer.
-//
-// Privval responses are tiny (PubKey ~50 B, SignVoteResponse ~150 B, etc.),
-// so a single SC_DATA_MAX_SIZE buffer comfortably holds one response. If a
-// future message exceeds that, sink_write returns -1 and the privval
-// state machine aborts the connection.
+// Sink: ctx is the per-chain pointer. Buffer plaintext on write, seal and
+// emit on flush. Privval responses are tiny (PubKey ~50 B, SignVoteResponse
+// ~150 B), so one SC_DATA_MAX_SIZE buffer comfortably holds one response.
 static int sc_sink_write(void *ctx, const uint8_t *bytes, size_t len) {
-    cosmos_conn_t *c = (cosmos_conn_t *)ctx;
+    cosmos_chain_t *c = (cosmos_chain_t *)ctx;
     if ((size_t)c->sink_pos + len > sizeof(c->sink_buf)) {
         os_console_log("cosmos-sc: response overflowed SC frame");
         return -1;
@@ -88,7 +98,7 @@ static int sc_sink_write(void *ctx, const uint8_t *bytes, size_t len) {
 }
 
 static void sc_sink_flush(void *ctx) {
-    cosmos_conn_t *c = (cosmos_conn_t *)ctx;
+    cosmos_chain_t *c = (cosmos_chain_t *)ctx;
     uint8_t sealed[SC_SEALED_FRAME_SIZE];
     sc_seal_frame(&c->handshake.sc, c->sink_buf,
                   (uint32_t)c->sink_pos, sealed);
@@ -99,42 +109,41 @@ static void sc_sink_flush(void *ctx) {
     }
 }
 
-static int push_bytes(struct tcp_pcb *pcb, const uint8_t *bytes, uint16_t len) {
+static int push_bytes(struct tcp_pcb *pcb, const uint8_t *bytes, uint16_t len,
+                      const char *label) {
     err_t e = tcp_write(pcb, bytes, len, TCP_WRITE_FLAG_COPY);
     if (e != ERR_OK) {
-        char b[48];
-        snprintf(b, sizeof(b), "cosmos-sc: tcp_write err=%d sndbuf=%u",
-                 (int)e, (unsigned)tcp_sndbuf(pcb));
+        char b[64];
+        snprintf(b, sizeof(b), "cosmos-sc[%s]: tcp_write err=%d sndbuf=%u",
+                 label, (int)e, (unsigned)tcp_sndbuf(pcb));
         os_console_log(b);
         return -1;
     }
     e = tcp_output(pcb);
     if (e != ERR_OK) {
-        char b[40];
-        snprintf(b, sizeof(b), "cosmos-sc: tcp_output err=%d", (int)e);
+        char b[56];
+        snprintf(b, sizeof(b), "cosmos-sc[%s]: tcp_output err=%d", label, (int)e);
         os_console_log(b);
         return -1;
     }
     return 0;
 }
 
-static int advance(cosmos_conn_t *c) {
+static int advance(cosmos_chain_t *c) {
     if (c->rx_got < c->rx_need) return 0;
+    const char *label = c->slot->label;
 
     if (c->phase == RX_EPH) {
         uint8_t eph_msg[COSMOS_SC_EPH_MSG_SIZE];
         cosmos_sc_start(&c->handshake, c->val_pub, eph_msg);
-        if (push_bytes(c->pcb, eph_msg, COSMOS_SC_EPH_MSG_SIZE) != 0) {
-            os_console_log("cosmos-sc: tx eph failed");
+        if (push_bytes(c->pcb, eph_msg, COSMOS_SC_EPH_MSG_SIZE, label) != 0) {
             return -1;
         }
-
         int rc = cosmos_sc_derive_keys(&c->handshake, c->rx_buf);
         if (rc != 0) {
             os_console_log("cosmos-sc: derive_keys failed");
             return -1;
         }
-
         uint8_t sig[64];
         rc = os_crypto_sign(OS_CURVE_ED25519, VALIDATOR_KEY_PATH,
                             c->handshake.challenge,
@@ -143,17 +152,14 @@ static int advance(cosmos_conn_t *c) {
             os_console_log("cosmos-sc: os_crypto_sign failed");
             return -1;
         }
-
         uint8_t sealed[COSMOS_SC_AUTH_SEALED_SIZE];
         if (cosmos_sc_seal_auth(&c->handshake, sig, sealed) != 0) {
             os_console_log("cosmos-sc: seal_auth failed");
             return -1;
         }
-        if (push_bytes(c->pcb, sealed, COSMOS_SC_AUTH_SEALED_SIZE) != 0) {
-            os_console_log("cosmos-sc: tx auth failed");
+        if (push_bytes(c->pcb, sealed, COSMOS_SC_AUTH_SEALED_SIZE, label) != 0) {
             return -1;
         }
-
         c->phase   = RX_AUTH;
         c->rx_got  = 0;
         c->rx_need = COSMOS_SC_AUTH_SEALED_SIZE;
@@ -163,8 +169,8 @@ static int advance(cosmos_conn_t *c) {
     if (c->phase == RX_AUTH) {
         int rc = cosmos_sc_handle_auth(&c->handshake, c->rx_buf);
         if (rc != 0) {
-            char buf[48];
-            snprintf(buf, sizeof(buf), "cosmos-sc: handle_auth rc=%d", rc);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "cosmos-sc[%s]: handle_auth rc=%d", label, rc);
             os_console_log(buf);
             return -1;
         }
@@ -174,7 +180,9 @@ static int advance(cosmos_conn_t *c) {
             os_console_log("cosmos-sc: peer pubkey not in allowlist; closing");
             return -1;
         }
-        os_console_log("cosmos-sc: handshake complete");
+        char log[64];
+        snprintf(log, sizeof(log), "cosmos-sc[%s]: handshake complete", label);
+        os_console_log(log);
         privval_reset_state(&c->parser);
         c->phase   = RX_PRIVVAL;
         c->rx_got  = 0;
@@ -183,17 +191,12 @@ static int advance(cosmos_conn_t *c) {
     }
 
     if (c->phase == RX_PRIVVAL) {
-        // Decrypt one sealed frame, then feed its plaintext bytes through
-        // the privval state machine. The sink wraps each response frame
-        // in another AEAD seal before pushing it back over TCP.
         uint8_t plain[SC_DATA_MAX_SIZE];
         uint32_t plain_len = 0;
-        if (sc_open_frame(&c->handshake.sc, c->rx_buf,
-                          plain, &plain_len) != 0) {
+        if (sc_open_frame(&c->handshake.sc, c->rx_buf, plain, &plain_len) != 0) {
             os_console_log("cosmos-sc: open_frame failed");
             return -1;
         }
-
         privval_sink_t sink = {
             .write = sc_sink_write,
             .flush = sc_sink_flush,
@@ -206,7 +209,6 @@ static int advance(cosmos_conn_t *c) {
                 return -1;
             }
         }
-
         c->rx_got  = 0;
         c->rx_need = SC_SEALED_FRAME_SIZE;
         return 0;
@@ -215,18 +217,20 @@ static int advance(cosmos_conn_t *c) {
     return 0;
 }
 
-// In dialer mode, schedule a reconnect after the active connection ends
-// (clean disconnect, framing error, etc.). In listener mode this is a no-op.
-static void connection_closed(cosmos_conn_t *c);
+static void connection_closed(cosmos_chain_t *c) {
+    reset_conn_state(c);
+    schedule_retry(c);
+}
 
 static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
     (void)err;
-    cosmos_conn_t *c = (cosmos_conn_t *)arg;
+    cosmos_chain_t *c = (cosmos_chain_t *)arg;
     if (!p) {
-        os_console_log("cosmos-sc: client disconnected");
+        char log[64];
+        snprintf(log, sizeof(log), "cosmos-sc[%s]: peer closed", c->slot->label);
+        os_console_log(log);
         tcp_close(pcb);
         connection_closed(c);
-        conn_free(c);
         return ERR_OK;
     }
 
@@ -246,7 +250,6 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) 
                 pbuf_free(p);
                 tcp_close(pcb);
                 connection_closed(c);
-                conn_free(c);
                 return ERR_ABRT;
             }
         }
@@ -257,96 +260,15 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) 
     return ERR_OK;
 }
 
-static err_t on_accept(void *arg, struct tcp_pcb *pcb, err_t err) {
-    (void)arg; (void)err;
-    cosmos_conn_t *c = conn_alloc();
-    if (!c) {
-        os_console_log("cosmos-sc: pool full; rejecting");
-        tcp_close(pcb);
-        return ERR_MEM;
-    }
-    os_console_log("cosmos-sc: client connected");
-    c->pcb = pcb;
-
-    size_t val_pub_len = 0;
-    if (os_crypto_get_pubkey(OS_CURVE_ED25519, VALIDATOR_KEY_PATH,
-                             c->val_pub, sizeof(c->val_pub),
-                             &val_pub_len) != 0
-        || val_pub_len != 32) {
-        os_console_log("cosmos-sc: get_pubkey failed");
-        tcp_close(pcb);
-        conn_free(c);
-        return ERR_ABRT;
-    }
-
-    c->phase   = RX_EPH;
-    c->rx_need = COSMOS_SC_EPH_MSG_SIZE;
-    c->rx_got  = 0;
-    tcp_arg(pcb,  c);
-    tcp_recv(pcb, on_recv);
-    return ERR_OK;
-}
-
-// ============================================================================
-// Two operating modes, selected at compile time:
-//
-//   - Default: TCP listener on COSMOS_SC_DRIVER_PORT. pwctl + dev clients
-//     dial in. Convenient for testing.
-//
-//   - With -DCOSMOS_SC_DIAL_HOST=\"x.y.z.w\" (and optional COSMOS_SC_DIAL_PORT):
-//     TCP dialer. The device connects out to cometbft's
-//     `priv_validator_laddr` listener. This is what stock cometbft
-//     expects -- cometbft is the server, the signer is the client.
-//
-// In dialer mode we retry every COSMOS_SC_DIAL_RETRY_MS milliseconds if
-// the connection drops or fails, so cometbft can be started after the
-// device or restarted at will.
-// ============================================================================
-
-#ifdef COSMOS_SC_DIAL_HOST
-
-#include "pico/time.h"
-#include "tusb.h"
-#include "lwip/ip4_addr.h"
-
-#ifndef COSMOS_SC_DIAL_PORT
-#define COSMOS_SC_DIAL_PORT     26690
-#endif
-#ifndef COSMOS_SC_DIAL_RETRY_MS
-#define COSMOS_SC_DIAL_RETRY_MS 3000
-#endif
-// Settling time after USB enumerates before the first dial. Issuing
-// tcp_connect before tud_ready() + a brief stabilization window wedges the
-// netif on macOS hosts.
-#ifndef COSMOS_SC_DIAL_STABILIZE_TICKS
-#define COSMOS_SC_DIAL_STABILIZE_TICKS 1000
-#endif
-
-// Connection-state flags driven by the callbacks. Reads/writes happen only
-// from the main loop or lwIP callbacks (same context under NO_SYS=1).
-// Stay process-global for now; per-target FSM lands with multi-slot
-// wiring in a follow-up commit.
-static bool        g_dial_in_flight = false;  // SYN sent, awaiting on_dial_connected/on_dial_err
-static bool        g_connected      = false;  // on_dial_connected returned OK; pcb live
-static uint32_t    g_ready_ticks    = 0;      // ticks since tud_ready() first true
-static absolute_time_t g_next_dial_at;        // absolute time of next retry
-
-static void connection_closed(cosmos_conn_t *c) {
-    (void)c;
-    g_connected      = false;
-    g_dial_in_flight = false;
-    g_next_dial_at   = make_timeout_time_ms(COSMOS_SC_DIAL_RETRY_MS);
-}
-
-// tcp_err: lwIP invokes this when the pcb is aborted (RST, ARP failure,
-// transmit fatal error, ...). The pcb is already freed -- do NOT touch it.
+// tcp_err: lwIP invokes this when the pcb is aborted. The pcb is already
+// freed -- do NOT touch it.
 static void on_dial_err(void *arg, err_t err) {
-    cosmos_conn_t *c = (cosmos_conn_t *)arg;
-    char buf[48];
-    snprintf(buf, sizeof(buf), "cosmos-sc: dial err cb rc=%d", (int)err);
+    cosmos_chain_t *c = (cosmos_chain_t *)arg;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "cosmos-sc[%s]: dial err rc=%d",
+             c->slot->label, (int)err);
     os_console_log(buf);
     connection_closed(c);
-    conn_free(c);
 }
 
 static err_t on_dial_sent(void *arg, struct tcp_pcb *pcb, u16_t len) {
@@ -360,16 +282,18 @@ static err_t on_dial_poll(void *arg, struct tcp_pcb *pcb) {
 }
 
 static err_t on_dial_connected(void *arg, struct tcp_pcb *pcb, err_t err) {
-    cosmos_conn_t *c = (cosmos_conn_t *)arg;
+    cosmos_chain_t *c = (cosmos_chain_t *)arg;
     if (err != ERR_OK) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "cosmos-sc: connect cb rc=%d; retrying", (int)err);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "cosmos-sc[%s]: connect rc=%d",
+                 c->slot->label, (int)err);
         os_console_log(buf);
         connection_closed(c);
-        conn_free(c);
         return err;
     }
-    os_console_log("cosmos-sc: connected to remote validator");
+    char log[64];
+    snprintf(log, sizeof(log), "cosmos-sc[%s]: connected", c->slot->label);
+    os_console_log(log);
     c->pcb = pcb;
 
     size_t val_pub_len = 0;
@@ -380,7 +304,6 @@ static err_t on_dial_connected(void *arg, struct tcp_pcb *pcb, err_t err) {
         os_console_log("cosmos-sc: get_pubkey failed");
         tcp_abort(pcb);
         connection_closed(c);
-        conn_free(c);
         return ERR_ABRT;
     }
 
@@ -388,95 +311,84 @@ static err_t on_dial_connected(void *arg, struct tcp_pcb *pcb, err_t err) {
     c->rx_need = COSMOS_SC_EPH_MSG_SIZE;
     c->rx_got  = 0;
     tcp_recv(pcb, on_recv);
-    g_connected      = true;
-    g_dial_in_flight = false;
+    c->connected      = true;
+    c->dial_in_flight = false;
     return ERR_OK;
 }
 
-// Issue one dial attempt. Caller has already determined this is the right
-// moment (USB up, no connection in flight, retry interval elapsed).
-static void issue_dial(void) {
-    cosmos_conn_t *c = conn_alloc();
-    if (!c) {
-        os_console_log("cosmos-sc: pool full; deferring dial");
-        g_next_dial_at = make_timeout_time_ms(COSMOS_SC_DIAL_RETRY_MS);
-        return;
-    }
+// Issue one dial attempt for slot c. Caller has already determined this
+// is the right moment.
+static void issue_dial(cosmos_chain_t *c) {
     struct tcp_pcb *pcb = tcp_new();
     if (!pcb) {
         os_console_log("cosmos-sc: tcp_new failed");
-        conn_free(c);
         connection_closed(c);
         return;
     }
 
     // Canonical pico-examples order: arg first, then every callback, THEN
-    // tcp_connect. A prior sparse callback set (only tcp_err) plus
-    // sys_timeout firing early was the original wedge pattern.
+    // tcp_connect.
     tcp_arg(pcb,  c);
     tcp_err(pcb,  on_dial_err);
     tcp_sent(pcb, on_dial_sent);
     tcp_poll(pcb, on_dial_poll, 4);
 
     ip4_addr_t remote;
-    if (!ip4addr_aton(COSMOS_SC_DIAL_HOST, &remote)) {
-        os_console_log("cosmos-sc: bad COSMOS_SC_DIAL_HOST");
-        tcp_abort(pcb);
-        conn_free(c);
-        g_dial_in_flight = false;  // fatal misconfig; don't retry
-        return;
-    }
+    IP4_ADDR(&remote,
+             c->slot->dial_host[0], c->slot->dial_host[1],
+             c->slot->dial_host[2], c->slot->dial_host[3]);
 
-    os_console_log("cosmos-sc: dialing...");
-    g_dial_in_flight = true;
-    err_t e = tcp_connect(pcb, &remote, COSMOS_SC_DIAL_PORT, on_dial_connected);
+    char log[80];
+    snprintf(log, sizeof(log),
+             "cosmos-sc[%s]: dialing %u.%u.%u.%u:%u",
+             c->slot->label,
+             c->slot->dial_host[0], c->slot->dial_host[1],
+             c->slot->dial_host[2], c->slot->dial_host[3],
+             (unsigned)c->slot->port);
+    os_console_log(log);
+    c->dial_in_flight = true;
+    err_t e = tcp_connect(pcb, &remote, c->slot->port, on_dial_connected);
     if (e != ERR_OK) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "cosmos-sc: tcp_connect sync rc=%d", (int)e);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "cosmos-sc[%s]: tcp_connect rc=%d",
+                 c->slot->label, (int)e);
         os_console_log(buf);
         tcp_abort(pcb);
-        conn_free(c);
         connection_closed(c);
     }
-    // success path: leave g_dial_in_flight=true; on_dial_connected or
+    // success path: leave dial_in_flight=true; on_dial_connected or
     // on_dial_err clears it when the attempt resolves.
 }
 
 void cosmos_sc_driver_init(void) {
-    memset(g_pool, 0, sizeof(g_pool));
-    char b[64];
-    snprintf(b, sizeof(b), "cosmos-sc: dial mode -> " COSMOS_SC_DIAL_HOST ":%d",
-             COSMOS_SC_DIAL_PORT);
+    memset(g_chains, 0, sizeof(g_chains));
+    size_t configured = 0;
+    for (size_t i = 0; i < CHAINS_MAX_PER_FAMILY; i++) {
+        const chain_slot_t *slot = chains_get(CHAINS_FAMILY_COSMOS, i);
+        if (!slot->in_use) continue;
+        g_chains[i].slot         = slot;
+        g_chains[i].next_dial_at = get_absolute_time();   // first dial gated by USB-ready
+        configured++;
+    }
+    char b[48];
+    snprintf(b, sizeof(b), "cosmos-sc: %zu chain(s) configured", configured);
     os_console_log(b);
-    g_next_dial_at = get_absolute_time();   // first dial is gated by USB-ready, not time
 }
 
 void cosmos_sc_driver_service(void) {
-    if (g_connected || g_dial_in_flight) return;
-    if (!tud_ready()) { g_ready_ticks = 0; return; }
-    if (g_ready_ticks < COSMOS_SC_DIAL_STABILIZE_TICKS) {
-        g_ready_ticks++;
+    if (!tud_ready()) {
+        for (size_t i = 0; i < CHAINS_MAX_PER_FAMILY; i++) g_chains[i].ready_ticks = 0;
         return;
     }
-    if (absolute_time_diff_us(get_absolute_time(), g_next_dial_at) > 0) return;
-    issue_dial();
+    for (size_t i = 0; i < CHAINS_MAX_PER_FAMILY; i++) {
+        cosmos_chain_t *c = &g_chains[i];
+        if (!c->slot) continue;
+        if (c->connected || c->dial_in_flight) continue;
+        if (c->ready_ticks < COSMOS_SC_DIAL_STABILIZE_TICKS) {
+            c->ready_ticks++;
+            continue;
+        }
+        if (absolute_time_diff_us(get_absolute_time(), c->next_dial_at) > 0) continue;
+        issue_dial(c);
+    }
 }
-
-#else   // ---- listener mode (default) ----
-
-static void connection_closed(cosmos_conn_t *c) { (void)c; /* listener keeps listening */ }
-
-void cosmos_sc_driver_init(void) {
-    memset(g_pool, 0, sizeof(g_pool));
-
-    struct tcp_pcb *pcb = tcp_new();
-    if (!pcb) return;
-    if (tcp_bind(pcb, IP_ADDR_ANY, COSMOS_SC_DRIVER_PORT) != ERR_OK) return;
-    struct tcp_pcb *lpcb = tcp_listen(pcb);
-    if (!lpcb) return;
-    tcp_accept(lpcb, on_accept);
-}
-
-void cosmos_sc_driver_service(void) { /* no-op in listener mode */ }
-
-#endif

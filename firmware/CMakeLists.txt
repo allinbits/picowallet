@@ -97,25 +97,6 @@ target_link_libraries(picowallet
     pico_rand
 )
 
-# Optional: build the cosmos SecretConnection driver in dialer mode.
-# When COSMOS_SC_DIAL_HOST is set, the device will dial out to that address
-# (cometbft's priv_validator_laddr listener) instead of listening for clients
-# to connect. Used for the testnet integration in scripts/testnet.sh.
-#
-#   cmake -S firmware -B firmware/build \
-#         -DCOSMOS_SC_DIAL_HOST=192.168.7.2 -DCOSMOS_SC_DIAL_PORT=26690
-if(COSMOS_SC_DIAL_HOST)
-    target_compile_definitions(picowallet PRIVATE
-        COSMOS_SC_DIAL_HOST="${COSMOS_SC_DIAL_HOST}")
-    if(COSMOS_SC_DIAL_PORT)
-        target_compile_definitions(picowallet PRIVATE
-            COSMOS_SC_DIAL_PORT=${COSMOS_SC_DIAL_PORT})
-    endif()
-    message(STATUS "cosmos-sc: DIALER mode -> ${COSMOS_SC_DIAL_HOST}:${COSMOS_SC_DIAL_PORT}")
-else()
-    message(STATUS "cosmos-sc: LISTENER mode (default)")
-endif()
-
 # Diagnostic: minimal outbound-TCP smoke test (apps/dialer_test.c). Used to
 # isolate the cosmos dialer wedge. When set, the cosmos SC driver is forced
 # back to listener mode (the dialer-under-test lives in dialer_test.c).

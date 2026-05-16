@@ -1,19 +1,18 @@
-// TCP driver for the gno.land SecretConnection handshake.
+// TCP listener for the gno.land SecretConnection handshake.
 //
-// Listens on GNO_SC_DRIVER_PORT. Peer connects, sends their 35-byte
-// ephemeral; on receiving it we emit our 35-byte ephemeral + the 1044-byte
-// sealed auth-sig back-to-back, then wait for the peer's sealed auth-sig.
+// One tcp_listen per configured gno chain slot (os/storage/chains.h).
+// Each slot owns its own listening pcb, plus at-most-one active connection
+// inline (gno validators only ever open a single signer connection per
+// chain). The slot pointer rides on tcp_arg through accept/recv so slots
+// stay isolated.
+//
+// 0 gno slots configured = no listeners bound. The driver is dormant.
 //
 // NOTE: we deliberately do NOT tcp_write inside tcp_accept -- pico-sdk's
 // bundled lwIP returns ERR_MEM in that path. See [[reference_lwip_accept_no_write]].
 // The peer is therefore required to send first. The Go reference protocol
 // does both sides concurrently in goroutines, so this asymmetric ordering
 // is compatible -- only one side blocks waiting, never both.
-//
-// Per-connection state is allocated from a small pool and attached to
-// each pcb via tcp_arg. Pool size is 1 today (single-listener behavior
-// unchanged from before); a later commit bumps it to match the number of
-// configured gno chain slots.
 
 #include <stdio.h>
 #include <string.h>
@@ -36,73 +35,65 @@ typedef enum {
     RX_PRIVVAL,         // handshake done; reading sealed privval frames
 } rx_phase_t;
 
-typedef struct gno_conn {
-    bool             in_use;
-    struct tcp_pcb  *pcb;
-    gno_sc_t         handshake;
-    bool             handshake_init;
-    rx_phase_t       phase;
-    uint8_t          val_pub[32];
-    uint8_t          rx_buf[GNO_SC_AUTH_SEALED_SIZE];  // big enough for either stage
-    uint16_t         rx_need;
-    uint16_t         rx_got;
-} gno_conn_t;
+typedef struct gno_chain {
+    const chain_slot_t *slot;       // NULL if this index is unconfigured
+    struct tcp_pcb     *lpcb;       // listening pcb (bound at init)
 
-#define GNO_CONN_POOL_SIZE  1
-static gno_conn_t g_pool[GNO_CONN_POOL_SIZE];
+    // Active connection (one at a time per slot; gno validators dial in
+    // a single signer connection).
+    bool                connected;
+    struct tcp_pcb     *pcb;
+    gno_sc_t            handshake;
+    bool                handshake_init;
+    rx_phase_t          phase;
+    uint8_t             val_pub[32];
+    uint8_t             rx_buf[GNO_SC_AUTH_SEALED_SIZE];
+    uint16_t            rx_need;
+    uint16_t            rx_got;
+} gno_chain_t;
 
-static gno_conn_t *conn_alloc(void) {
-    for (size_t i = 0; i < GNO_CONN_POOL_SIZE; i++) {
-        if (!g_pool[i].in_use) {
-            memset(&g_pool[i], 0, sizeof(g_pool[i]));
-            g_pool[i].in_use = true;
-            g_pool[i].phase  = RX_NONE;
-            return &g_pool[i];
-        }
-    }
-    return NULL;
+static gno_chain_t g_chains[CHAINS_MAX_PER_FAMILY];
+
+static void reset_conn_state(gno_chain_t *c) {
+    c->connected      = false;
+    c->pcb            = NULL;
+    c->handshake_init = false;
+    c->phase          = RX_NONE;
+    c->rx_need        = 0;
+    c->rx_got         = 0;
+    memset(&c->handshake, 0, sizeof(c->handshake));
+    memset(c->rx_buf,     0, sizeof(c->rx_buf));
 }
 
-static void conn_free(gno_conn_t *c) {
-    if (!c) return;
-    memset(c, 0, sizeof(*c));
-}
-
-// Push len bytes via tcp_write+tcp_output. Returns 0 on success, -1 on err.
-// Logs the lwIP error code so failures aren't ambiguous.
-static int push_bytes(struct tcp_pcb *pcb, const uint8_t *bytes, uint16_t len) {
+static int push_bytes(struct tcp_pcb *pcb, const uint8_t *bytes, uint16_t len,
+                      const char *label) {
     err_t e = tcp_write(pcb, bytes, len, TCP_WRITE_FLAG_COPY);
     if (e != ERR_OK) {
-        char b[48];
-        snprintf(b, sizeof(b), "gno-sc: tcp_write err=%d sndbuf=%u",
-                 (int)e, (unsigned)tcp_sndbuf(pcb));
+        char b[64];
+        snprintf(b, sizeof(b), "gno-sc[%s]: tcp_write err=%d sndbuf=%u",
+                 label, (int)e, (unsigned)tcp_sndbuf(pcb));
         os_console_log(b);
         return -1;
     }
     e = tcp_output(pcb);
     if (e != ERR_OK) {
-        char b[40];
-        snprintf(b, sizeof(b), "gno-sc: tcp_output err=%d", (int)e);
+        char b[56];
+        snprintf(b, sizeof(b), "gno-sc[%s]: tcp_output err=%d", label, (int)e);
         os_console_log(b);
         return -1;
     }
     return 0;
 }
 
-// Drive the state machine forward whenever rx_got reaches rx_need.
-// Returns 0 if the connection should stay open; -1 to close.
-static int advance(gno_conn_t *c) {
-    if (c->rx_got < c->rx_need) return 0;  // need more bytes
+static int advance(gno_chain_t *c) {
+    if (c->rx_got < c->rx_need) return 0;
+    const char *label = c->slot->label;
 
     if (c->phase == RX_EPH) {
-        // Peer's 35-byte ephemeral is in rx_buf. Now generate ours, push it,
-        // derive keys, sign the challenge via the OS keystore, seal the
-        // auth-sig, and push that too.
         uint8_t eph_msg[GNO_SC_EPH_MSG_SIZE];
         gno_sc_start(&c->handshake, c->val_pub, eph_msg);
         c->handshake_init = true;
-        if (push_bytes(c->pcb, eph_msg, GNO_SC_EPH_MSG_SIZE) != 0) {
-            os_console_log("gno-sc: tx eph failed");
+        if (push_bytes(c->pcb, eph_msg, GNO_SC_EPH_MSG_SIZE, label) != 0) {
             return -1;
         }
 
@@ -126,8 +117,7 @@ static int advance(gno_conn_t *c) {
             os_console_log("gno-sc: seal_auth failed");
             return -1;
         }
-        if (push_bytes(c->pcb, sealed, GNO_SC_AUTH_SEALED_SIZE) != 0) {
-            os_console_log("gno-sc: tx auth failed");
+        if (push_bytes(c->pcb, sealed, GNO_SC_AUTH_SEALED_SIZE, label) != 0) {
             return -1;
         }
 
@@ -140,22 +130,20 @@ static int advance(gno_conn_t *c) {
     if (c->phase == RX_AUTH) {
         int rc = gno_sc_handle_auth(&c->handshake, c->rx_buf);
         if (rc != 0) {
-            char buf[48];
-            snprintf(buf, sizeof(buf), "gno-sc: handle_auth rc=%d", rc);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "gno-sc[%s]: handle_auth rc=%d", label, rc);
             os_console_log(buf);
             return -1;
         }
-        // Peer pubkey pinning: if any keys are configured, the peer must
-        // match; otherwise we run permissive and log a warning so operators
-        // notice they're unpinned.
         if (chains_pinned_count() == 0) {
             os_console_log("gno-sc: WARN no pinned peer keys (permissive)");
         } else if (!chains_pinned_check(c->handshake.rem_pub)) {
             os_console_log("gno-sc: peer pubkey not in allowlist; closing");
             return -1;
         }
-        os_console_log("gno-sc: handshake complete");
-        // Switch to reading sealed privval frames.
+        char log[64];
+        snprintf(log, sizeof(log), "gno-sc[%s]: handshake complete", label);
+        os_console_log(log);
         c->phase   = RX_PRIVVAL;
         c->rx_got  = 0;
         c->rx_need = SC_SEALED_FRAME_SIZE;
@@ -163,12 +151,9 @@ static int advance(gno_conn_t *c) {
     }
 
     if (c->phase == RX_PRIVVAL) {
-        // One sealed frame = one privval request (multi-frame messages
-        // aren't supported yet; gno's PubKey/SignRequest are tiny and fit).
         uint8_t plain[SC_DATA_MAX_SIZE];
         uint32_t plain_len = 0;
-        int rc = sc_open_frame(&c->handshake.sc, c->rx_buf,
-                               plain, &plain_len);
+        int rc = sc_open_frame(&c->handshake.sc, c->rx_buf, plain, &plain_len);
         if (rc != 0) {
             os_console_log("gno-sc: open_frame failed");
             return -1;
@@ -193,11 +178,10 @@ static int advance(gno_conn_t *c) {
                 os_console_log("gno-sc: encode pubkey_resp failed");
                 return -1;
             }
-            os_console_log("gno-sc: served PubKeyRequest");
+            char log[64];
+            snprintf(log, sizeof(log), "gno-sc[%s]: served PubKeyRequest", label);
+            os_console_log(log);
         } else if (req_type == GNO_PRIVVAL_REQ_SIGN) {
-            // Parse the canonical sign-bytes to extract HWM-relevant fields.
-            // Reject anything that doesn't look like a vote/proposal -- we
-            // must never sign blindly, even for an authenticated peer.
             int32_t      type   = 0;
             int64_t      height = 0;
             int32_t      round  = 0;
@@ -213,11 +197,11 @@ static int advance(gno_conn_t *c) {
                 goto emit_response;
             }
             if (!hwm_advance(chain_id, chain_id_len, type, height, round)) {
-                char log[80];
+                char log[96];
                 int cid_show = (int)(chain_id_len > 20 ? 20 : chain_id_len);
                 snprintf(log, sizeof(log),
-                         "gno-sc: double_sign_refused %.*s t=%d h=%lld r=%d",
-                         cid_show, chain_id, (int)type,
+                         "gno-sc[%s]: double_sign_refused %.*s t=%d h=%lld r=%d",
+                         label, cid_show, chain_id, (int)type,
                          (long long)height, (int)round);
                 os_console_log(log);
                 resp_len = gno_privval_encode_sign_response_error(
@@ -237,10 +221,10 @@ static int advance(gno_conn_t *c) {
                 os_console_log("gno-sc: encode sign_resp failed");
                 return -1;
             }
-            char log[80];
+            char log[96];
             int cid_show = (int)(chain_id_len > 20 ? 20 : chain_id_len);
-            snprintf(log, sizeof(log), "gno-sc: signed %.*s t=%d h=%lld r=%d",
-                     cid_show, chain_id, (int)type,
+            snprintf(log, sizeof(log), "gno-sc[%s]: signed %.*s t=%d h=%lld r=%d",
+                     label, cid_show, chain_id, (int)type,
                      (long long)height, (int)round);
             os_console_log(log);
         } else {
@@ -252,12 +236,10 @@ static int advance(gno_conn_t *c) {
         uint8_t sealed[SC_SEALED_FRAME_SIZE];
         sc_seal_frame(&c->handshake.sc, resp_plain,
                       (uint32_t)resp_len, sealed);
-        if (push_bytes(c->pcb, sealed, SC_SEALED_FRAME_SIZE) != 0) {
-            os_console_log("gno-sc: tx response failed");
+        if (push_bytes(c->pcb, sealed, SC_SEALED_FRAME_SIZE, label) != 0) {
             return -1;
         }
 
-        // Ready for the next request frame.
         c->rx_got  = 0;
         c->rx_need = SC_SEALED_FRAME_SIZE;
         return 0;
@@ -268,11 +250,13 @@ static int advance(gno_conn_t *c) {
 
 static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
     (void)err;
-    gno_conn_t *c = (gno_conn_t *)arg;
+    gno_chain_t *c = (gno_chain_t *)arg;
     if (!p) {
-        os_console_log("gno-sc: client disconnected");
+        char log[64];
+        snprintf(log, sizeof(log), "gno-sc[%s]: peer closed", c->slot->label);
+        os_console_log(log);
         tcp_close(pcb);
-        conn_free(c);
+        reset_conn_state(c);
         return ERR_OK;
     }
 
@@ -292,7 +276,7 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) 
                 tcp_recved(pcb, p->tot_len);
                 pbuf_free(p);
                 tcp_close(pcb);
-                conn_free(c);
+                reset_conn_state(c);
                 return ERR_ABRT;
             }
         }
@@ -304,14 +288,20 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) 
 }
 
 static err_t on_accept(void *arg, struct tcp_pcb *pcb, err_t err) {
-    (void)arg; (void)err;
-    gno_conn_t *c = conn_alloc();
-    if (!c) {
-        os_console_log("gno-sc: pool full; rejecting");
+    (void)err;
+    gno_chain_t *c = (gno_chain_t *)arg;
+    if (c->connected) {
+        char log[64];
+        snprintf(log, sizeof(log),
+                 "gno-sc[%s]: refusing second connection", c->slot->label);
+        os_console_log(log);
         tcp_close(pcb);
-        return ERR_MEM;
+        return ERR_OK;
     }
-    os_console_log("gno-sc: client connected");
+    char log[64];
+    snprintf(log, sizeof(log), "gno-sc[%s]: client connected", c->slot->label);
+    os_console_log(log);
+    c->connected = true;
     c->pcb = pcb;
 
     // Load the validator's long-term Ed25519 pubkey from the OS keystore.
@@ -324,7 +314,7 @@ static err_t on_accept(void *arg, struct tcp_pcb *pcb, err_t err) {
         || val_pub_len != 32) {
         os_console_log("gno-sc: get_pubkey failed");
         tcp_close(pcb);
-        conn_free(c);
+        reset_conn_state(c);
         return ERR_ABRT;
     }
 
@@ -337,12 +327,44 @@ static err_t on_accept(void *arg, struct tcp_pcb *pcb, err_t err) {
 }
 
 void gno_sc_driver_init(void) {
-    memset(g_pool, 0, sizeof(g_pool));
+    memset(g_chains, 0, sizeof(g_chains));
+    size_t configured = 0;
+    for (size_t i = 0; i < CHAINS_MAX_PER_FAMILY; i++) {
+        const chain_slot_t *slot = chains_get(CHAINS_FAMILY_GNO, i);
+        if (!slot->in_use) continue;
 
-    struct tcp_pcb *pcb = tcp_new();
-    if (!pcb) return;
-    if (tcp_bind(pcb, IP_ADDR_ANY, GNO_SC_DRIVER_PORT) != ERR_OK) return;
-    struct tcp_pcb *lpcb = tcp_listen(pcb);
-    if (!lpcb) return;
-    tcp_accept(lpcb, on_accept);
+        struct tcp_pcb *pcb = tcp_new();
+        if (!pcb) continue;
+        if (tcp_bind(pcb, IP_ADDR_ANY, slot->port) != ERR_OK) {
+            char log[80];
+            snprintf(log, sizeof(log),
+                     "gno-sc[%s]: tcp_bind port %u failed",
+                     slot->label, (unsigned)slot->port);
+            os_console_log(log);
+            continue;
+        }
+        struct tcp_pcb *lpcb = tcp_listen(pcb);
+        if (!lpcb) {
+            char log[80];
+            snprintf(log, sizeof(log),
+                     "gno-sc[%s]: tcp_listen port %u failed",
+                     slot->label, (unsigned)slot->port);
+            os_console_log(log);
+            continue;
+        }
+        g_chains[i].slot = slot;
+        g_chains[i].lpcb = lpcb;
+        tcp_arg(lpcb,    &g_chains[i]);
+        tcp_accept(lpcb, on_accept);
+        configured++;
+
+        char log[80];
+        snprintf(log, sizeof(log),
+                 "gno-sc[%s]: listening on port %u",
+                 slot->label, (unsigned)slot->port);
+        os_console_log(log);
+    }
+    char b[48];
+    snprintf(b, sizeof(b), "gno-sc: %zu chain(s) configured", configured);
+    os_console_log(b);
 }
