@@ -163,27 +163,3 @@ void chains_wipe(void) {
     memset(s_gno,    0, sizeof(s_gno));
     persist();
 }
-
-// ---- Legacy peer-pinning shim --------------------------------------------
-
-size_t chains_pinned_count(void) {
-    size_t n = 0;
-    for (size_t i = 0; i < CHAINS_MAX_PER_FAMILY; i++) {
-        if (s_cosmos[i].in_use && s_cosmos[i].has_pinned_key) n++;
-        if (s_gno[i].in_use    && s_gno[i].has_pinned_key)    n++;
-    }
-    return n;
-}
-
-bool chains_pinned_check(const uint8_t pubkey[CHAINS_PUBKEY_LEN]) {
-    if (chains_pinned_count() == 0) return true;  // permissive when nothing pinned
-    for (size_t i = 0; i < CHAINS_MAX_PER_FAMILY; i++) {
-        if (s_cosmos[i].in_use && s_cosmos[i].has_pinned_key
-            && memcmp(s_cosmos[i].pinned_key, pubkey, CHAINS_PUBKEY_LEN) == 0)
-            return true;
-        if (s_gno[i].in_use && s_gno[i].has_pinned_key
-            && memcmp(s_gno[i].pinned_key, pubkey, CHAINS_PUBKEY_LEN) == 0)
-            return true;
-    }
-    return false;
-}

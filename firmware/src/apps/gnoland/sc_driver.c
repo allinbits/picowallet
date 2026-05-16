@@ -135,10 +135,19 @@ static int advance(gno_chain_t *c) {
             os_console_log(buf);
             return -1;
         }
-        if (chains_pinned_count() == 0) {
-            os_console_log("gno-sc: WARN no pinned peer keys (permissive)");
-        } else if (!chains_pinned_check(c->handshake.rem_pub)) {
-            os_console_log("gno-sc: peer pubkey not in allowlist; closing");
+        if (!c->slot->has_pinned_key) {
+            char m[80];
+            snprintf(m, sizeof(m),
+                     "gno-sc[%s]: WARN no pinned peer key (permissive)",
+                     c->slot->label);
+            os_console_log(m);
+        } else if (memcmp(c->slot->pinned_key, c->handshake.rem_pub,
+                          CHAINS_PUBKEY_LEN) != 0) {
+            char m[80];
+            snprintf(m, sizeof(m),
+                     "gno-sc[%s]: peer pubkey mismatch; closing",
+                     c->slot->label);
+            os_console_log(m);
             return -1;
         }
         char log[64];

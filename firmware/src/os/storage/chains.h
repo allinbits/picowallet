@@ -72,14 +72,3 @@ bool chains_remove(chains_family_t fam, const char *label);
 
 // Wipe all slots in both families and persist the empty table.
 void chains_wipe(void);
-
-// ---- Legacy peer-pinning shim (removed in a later commit once each SC
-//      driver reaches the relevant slot directly during handshake). Mirrors
-//      the auth_keys_count/auth_keys_check semantics the drivers used before
-//      per-chain pinning landed:
-//
-//        - chains_pinned_count() == 0  -> permissive across BOTH families
-//        - chains_pinned_count() >  0  -> strict: any peer matched against
-//                                         the union of pinned keys
-size_t chains_pinned_count(void);
-bool   chains_pinned_check(const uint8_t pubkey[CHAINS_PUBKEY_LEN]);
