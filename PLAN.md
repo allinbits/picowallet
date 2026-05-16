@@ -78,7 +78,7 @@ during that window selects the operating mode:
 
 | Held button | Mode | USB | Use |
 |---|---|---|---|
-| LEFT | **TMKMS** | CDC serial REPL | Admin: provision allowlist, query state |
+| LEFT | **TMKMS** | CDC serial REPL | Admin: provision per-chain config, query state |
 | RIGHT | **PrivVal** | CDC-ECM (USB-Ethernet) | Signing: validator daemon dials in over TCP |
 
 Modes are mutually exclusive because they expose different USB descriptors.
@@ -129,12 +129,22 @@ Reboot to switch.
   format decoder before passing height/round/type into the shared
   `hwm_advance`. The device never signs bytes whose structure it cannot
   parse and account for.
-- **Authenticated peer required for encrypted channels.** Where the wire
-  protocol supports peer authentication (SecretConnection), the OS provides
-  a flash-persisted allowlist of peer pubkeys. Empty list = permissive
-  (logs a warning); any entry switches to strict matching.
+- **Per-chain isolation.** The operator declares one slot per chain in
+  TMKMS mode (up to 8 cosmos slots + 8 gno slots). Cosmos slots own a
+  dial target (host + port + optional pinned peer pubkey); gno slots own
+  a listen port (+ optional pinned peer pubkey). 0 cosmos slots = no
+  dialers launched. 0 gno slots = no listeners bound. Each slot has its
+  own SC state and runs independently so a slow peer on one chain cannot
+  queue signing for another.
+- **Strict chain_id binding.** Every slot records its expected chain_id.
+  A sign request whose canonical bytes claim a different chain_id is
+  refused with a `chain_id_mismatch` remote-signer error -- even if the
+  peer authenticated successfully.
+- **Per-slot peer pinning (optional).** If a slot's `pinned_key` is set,
+  only that exact SecretConnection long-term pubkey authenticates to
+  that slot. Unset = permissive (logs a warning).
 - **Admin operations need physical access.** All trust-changing operations
-  (add/remove pinned key, factory reset) live in TMKMS mode, which is
+  (add/remove chain slot, factory reset) live in TMKMS mode, which is
   reachable only by pressing a button at boot. The PrivVal-mode network
   channel never accepts admin commands.
 
@@ -147,7 +157,10 @@ Reboot to switch.
           ├──────────────────────────────────────┤
           │  Unused / growth                      │
 0x2FF000  ├──────────────────────────────────────┤
-          │  Peer allowlist  (4 KB sector)        │
+          │  Chain config   (4 KB sector)         │
+          │   • cosmos[8] + gno[8] slots          │
+          │   • label / chain_id / host / port    │
+          │   • optional pinned peer pubkey       │
 0x300000  ├──────────────────────────────────────┤
           │  HWM rolling log (1 MB / 256 sectors) │
           │   • 16 records × 256 B per sector     │
@@ -235,15 +248,11 @@ Phase ✓ = completed (verified end-to-end). Phase ◯ = open.
   - 8 chains: ~2.3 years
   - Real-world flash typically 2–5× the spec → multiply accordingly
 
-### ✓ M5c — Peer pubkey allowlist
+### ✓ M5c — Peer pubkey allowlist (superseded by M8 per-chain pinning)
 
-- RAM + flash-persisted (single 4 KB sector, erase-and-rewrite)
-- Strict-or-permissive: empty list = permissive with WARN log; any entry =
-  strict matching
-- TMKMS-mode REPL admin: `os.auth_list`, `os.auth_add <hex>`,
-  `os.auth_clear`
-- Verified end-to-end: allowed peer succeeds, mismatching peer is closed
-  immediately after handshake completes
+- Flat allowlist replaced by per-slot pinning in M8. Original behavior:
+  RAM + flash-persisted single 4 KB sector, strict-or-permissive, REPL
+  via `os.auth_{list,add,clear}`. All gone now.
 
 ### ◐ M6 — Cosmos SecretConnection (Merlin variant)
 
@@ -266,9 +275,10 @@ Subtasks:
   machine with Merlin challenge derivation + protobuf-delimited wire
   (ephemeral via `BytesValue`, auth-sig via `AuthSigMessage` with pubkey
   oneof). Outer wire: 35B ephemeral + 103B AuthSigMessage.
-- ✓ Add `apps/cosmos/sc_driver_cosmos.{h,c}` — TCP listener on port 26660;
-  shared `secret_connection.c` frame layer (AEAD + HKDF identical to gno).
-  Auth-keys allowlist check applies (same OS-level pinning as gno).
+- ✓ Add `apps/cosmos/sc_driver_cosmos.{h,c}` — initially a TCP listener
+  on port 26660; shared `secret_connection.c` frame layer (AEAD + HKDF
+  identical to gno). The driver was later rewritten to a per-chain
+  dialer in M8 (cometbft expects the signer to dial in).
 - ✓ Pure-Python Merlin in `tools/merlin.py`, byte-for-byte matched to the
   C implementation (same test vectors pass both sides).
 - ✓ `pwctl.py cosmos-sc-handshake` — full handshake driver using the Python
@@ -282,7 +292,43 @@ Subtasks:
   all run over SC now. Verified end-to-end against the device.
 - ◯ Integration test against a stock cometbft v0.38 validator listener.
 
-### ◯ M7 — TrustZone split
+### ✓ M7 — Testnet integration against real validators
+
+- `scripts/testnet.sh`: 4-validator cosmos-sdk testnet (v0.50.15) where
+  node3 uses the picowallet as its consensus signer via cometbft's TCP
+  remote-signer protocol. Device runs as the dialer.
+- `scripts/gno_testnet.sh`: same shape for a 4-validator gnoland testnet;
+  node3's `remote_signer.server_address` points at the device's gno
+  listener (gno's polarity is inverted).
+- `scripts/picowallet-bridge.py`: optional bridge mode for setups where
+  the firmware can only listen.
+
+### ✓ M8 — Per-chain multitenancy
+
+Goal: validate multiple chains on one device with full isolation -- a
+slow or compromised peer on chain A cannot block or coerce signing for
+chain B.
+
+- ✓ `os/storage/chains.{h,c}`: per-family table (cosmos[8] + gno[8])
+  with label, chain_id, dial host / listen port, optional pinned key.
+  Flash-persisted in the same 4 KB sector that used to hold the
+  allowlist. New TMKMS REPL: `os.{cosmos,gno}.chain.{add,remove,list}`
+  and `os.chain.wipe`.
+- ✓ Per-connection SC state lives in a pool attached to each pcb via
+  `tcp_arg`; the privval parser is caller-owned. No file-scope conn
+  state.
+- ✓ Multi-slot dialers + listeners. Cosmos slots each own an independent
+  dial FSM; gno slots each bind their own `tcp_listen`. 0 slots in a
+  family = no dialers / listeners. Compile-time `COSMOS_SC_DIAL_HOST`
+  flag retired.
+- ✓ Strict chain_id binding: sign requests are refused with
+  `chain_id_mismatch` if the canonical bytes don't match the slot's
+  chain_id, even with a successful SC handshake.
+- ✓ Per-slot peer pinning replaces the flat allowlist (M5c).
+- ◯ HWM still capped at 8 simultaneous chain_ids; bumping to 16
+  requires record-packing changes (see TODO in `hwm_flash.h`).
+
+### ◯ M9 — TrustZone split
 
 Pico 2's Cortex-M33 supports TrustZone. Goal: move keystore + HWM + AEAD
 into the secure world; non-secure world owns USB / lwIP / display / apps.
@@ -293,17 +339,17 @@ Subtasks:
 - Linker scripts for secure / non-secure split
 - ITCM/DTCM allocation for secure code
 - MPU configuration
-- Verify HWM, keystore, allowlist all live in secure world
+- Verify HWM, keystore, chain config all live in secure world
 - Re-test the whole stack
 
-### ◯ M8 — Signed firmware + OTP fuse
+### ◯ M10 — Signed firmware + OTP fuse
 
 - Firmware image signed by a build-time key
 - Verification in bootloader; reject unsigned updates
 - Burn OTP fuses to lock the verification key + enable secure boot
 - Provisioning flow for the OTP step (one-shot, irreversible)
 
-### ◯ M9 — HID transport (production parity)
+### ◯ M11 — HID transport (production parity)
 
 Swap USB CDC → HID for the TMKMS-mode admin channel, matching Ledger's
 production transport. CDC stays available behind a build flag for
@@ -346,7 +392,7 @@ picowallet/
 │       │   ├── storage/
 │       │   │   ├── flash_layout.h                single source for offsets
 │       │   │   ├── hwm_flash.{h,c}               per-chain HWM
-│       │   │   └── auth_keys.{h,c}               peer allowlist
+│       │   │   └── chains.{h,c}                  per-chain config table
 │       │   ├── transport/
 │       │   │   ├── eth.{h,c}                     USB-ECM + lwIP netif
 │       │   │   ├── usb{,_descriptors}.c
@@ -361,11 +407,11 @@ picowallet/
 │           │   ├── app.{h,c}
 │           │   ├── privval.{h,c}                 protobuf privval over SC
 │           │   ├── secret_connection_cosmos.{h,c} Merlin handshake
-│           │   └── sc_driver_cosmos.{h,c}        TCP driver (listener or dialer)
+│           │   └── sc_driver_cosmos.{h,c}        per-chain dialers
 │           └── gnoland/
 │               ├── app.{h,c}
 │               ├── secret_connection_gno.{h,c}   HKDF-only handshake
-│               ├── sc_driver.{h,c}               TCP driver
+│               ├── sc_driver.{h,c}               per-chain listeners
 │               └── gno_privval.{h,c}             amino privval over SC
 ├── tools/
 │   ├── pwctl.py             host-side test harness (cosmos + gno paths)
@@ -394,14 +440,17 @@ cmake --build firmware/build
 
 ## 7. Host-side test harness
 
-`tools/pwctl.py` exercises every signing path end-to-end against the device
-in PrivVal mode. Requires `pip install pynacl cryptography`.
+`tools/pwctl.py` exercises the gno signing path end-to-end against the
+device in PrivVal mode. Requires `pip install pynacl cryptography` and at
+least one configured gno chain slot whose port matches what pwctl dials.
 
 | Subcommand | Exercises |
 |---|---|
-| `pubkey` | Cosmos privval `PubKeyRequest`; prints + verifies the validator pubkey |
-| `sign-vote --height H --chain-id CID` | Full cosmos `SignVoteRequest` → response → signature verify |
-| `sign-proposal --height H` | Same for `SignProposalRequest` (incl. POLRound) |
-| `replay --height H` | Replays a vote at the same (h,r,t) to confirm HWM rejection |
-| `bench --count N --start-height H` | Throughput / latency of N back-to-back sign-votes |
 | `gno-sc-handshake --sign-height H --signing-seed HEX` | Full gno path: SC handshake → PubKeyRequest → SignRequest → replay-rejection |
+
+Cosmos paths are exercised end-to-end via `scripts/testnet.sh` (real
+4-validator cosmos-sdk testnet with node3 using the device as its
+remote signer). The cosmos client-mode pwctl subcommands (`pubkey`,
+`sign-vote`, `sign-proposal`, `replay`, `bench`) targeted the old
+listener that was removed in M8; revive them by adding a listener mode
+to pwctl, or rely on the testnet harness.

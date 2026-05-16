@@ -4,8 +4,8 @@
 
 Brings up a 4-validator local cosmos-sdk testnet on the Mac. Three nodes use
 ordinary file-backed consensus keys; node3 uses the picowallet as its
-consensus signer via cometbft's TCP remote-signer protocol, with the device
-in **dialer mode** so the device initiates the connection to cometbft.
+consensus signer via cometbft's TCP remote-signer protocol. The device
+initiates the connection to cometbft (cometbft is the server).
 
 ```
   ┌──────────────┐  TCP + SecretConnection (Merlin)  ┌─────────────────────┐
@@ -26,43 +26,43 @@ in **dialer mode** so the device initiates the connection to cometbft.
 
 ### Per-run workflow
 
-#### 1. Build + flash dialer firmware
+#### 1. Build + flash the firmware
 
 ```
-cmake -S firmware -B firmware/build \
-      -DCOSMOS_SC_DIAL_HOST=192.168.7.2 -DCOSMOS_SC_DIAL_PORT=26690
-cmake --build firmware/build -j8
+make build
 # BOOTSEL + drag firmware/build/picowallet.uf2 to RPI-RP2
 ```
 
-The dialer firmware never listens for inbound TCP on the device; it dials
-out to cometbft. That means `pwctl` cannot reach it for things like
-`os.pubkey` while this firmware is running. The dialer takes its target
-host/port at build time.
+A single image; no compile-time dial target. The dial host/port comes
+from the chain slot config.
 
-#### 2. Reset device-side state before testing
+#### 2. Configure the cosmos chain slot in TMKMS mode
 
-The device persists two things in flash that bite testnet iteration:
-
-- **Auth allowlist** — pinned SC peer keys. CometBFT generates a fresh
-  ephemeral Ed25519 key for its privval listener on every restart, so it
-  cannot be pre-pinned. The allowlist must be empty (permissive).
-- **HWM table** — one slot per chain_id, capped at 8. Each testnet run
-  uses a fresh timestamped chain_id (so the run isn't seen as a
-  double-sign), which eats slots.
-
-Boot the device in **TMKMS mode** (USB-CDC) once, send these REPL commands,
-then reboot:
+In TMKMS mode (USB-CDC), declare the slot for this testnet's chain. The
+dial target is cometbft's `priv_validator_laddr`, exposed by node3 on
+192.168.7.2:26690 below.
 
 ```
-os.auth_clear
-os.hwm_wipe
+os.chain.wipe                                           # clear any prior slots
+os.hwm_wipe                                             # fresh testnet chain_id = fresh HWM
+os.cosmos.chain.add hub <CHAIN_ID> 192.168.7.2 26690    # no pinned key (permissive)
 ```
+
+`<CHAIN_ID>` must match what testnet.sh actually launches with. Either
+pass `CHAIN_ID=my-chain ./scripts/testnet.sh` to fix it, or read the
+timestamped default from testnet.sh's logs and provision the slot at
+that exact value. Strict chain_id binding means a mismatch refuses
+signing with `chain_id_mismatch` rather than silently working.
+
+Note: cometbft generates a fresh ephemeral Ed25519 long-term key for its
+privval listener on every restart, so its peer key cannot be pre-pinned.
+Leave the slot's pubkey arg unset to run permissive.
 
 #### 3. Boot device into PrivVal mode and launch the testnet
 
 Boot in PrivVal mode. The device's e-paper will show `val: <hex>` for
-the m/0' consensus pubkey and `cosmos-sc: dial mode -> 192.168.7.2:26690`.
+the m/0' consensus pubkey and `cosmos-sc[hub]: dialing 192.168.7.2:26690`
+once it starts retrying.
 
 The device's pubkey must match what's recorded in genesis. Pass it in
 via env var:
@@ -130,10 +130,9 @@ in the middle) but lets you skip reflashing.
 
 Same shape as the cosmos demo, but for gnoland. The validator polarity is
 inverted: gnoland DIALS the signer instead of the signer dialing gnoland.
-So the device runs in its default **listener mode** (port 26659) -- no
-firmware reflash needed when switching between the two demos. (The single
-dialer-build firmware happens to satisfy both: cosmos outbound + gno
-listener coexist in the same image.)
+So the device's gno slot owns a listen port; gnoland's
+`remote_signer.server_address` points at it. Cosmos outbound + gno listener
+coexist in the same image without any rebuild between demos.
 
 ```
   ┌──────────────┐                           ┌──────────────┐
@@ -167,11 +166,14 @@ listener coexist in the same image.)
 
 ### Per-run workflow
 
-1. Boot the device into TMKMS mode briefly to reset device-side state:
+1. Boot the device into TMKMS mode and configure a gno slot:
    ```
-   os.auth_clear        # allowlist empty -> permissive
-   os.hwm_wipe          # HWM table empty -> no double-sign false-positives
+   os.chain.wipe                                # clear any prior slots
+   os.hwm_wipe                                  # fresh chain_id -> fresh HWM
+   os.gno.chain.add test <CHAIN_ID> 26659       # no pinned key (permissive)
    ```
+   `<CHAIN_ID>` must match what gno_testnet.sh generates (set
+   `CHAIN_ID=...` env var or read the timestamped default from its logs).
 2. Boot back into PrivVal mode. Confirm `val: <hex>` matches your
    `PICOWALLET_PUBKEY_HEX` env var.
 3. Run:

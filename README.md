@@ -129,20 +129,50 @@ prompt:
 
 | Hold button | Mode | USB | Use |
 |---|---|---|---|
-| **LEFT** | TMKMS | CDC serial REPL | Admin: provision allowlist, inspect state |
+| **LEFT** | TMKMS | CDC serial REPL | Admin: provision per-chain config, inspect state |
 | **RIGHT** | PrivVal | CDC-Ethernet (`192.168.7.1`) | Signing |
 
 Reboot to switch.
 
-#### PrivVal-mode tests
+#### TMKMS-mode admin
+
+Before the device can sign anything, the operator declares one slot per
+chain in TMKMS mode. Each cosmos slot has a dial target; each gno slot
+has a listen port. Up to 8 of each.
 
 ```sh
-# Cosmos privval (plaintext, port 26658)
-.venv/bin/python tools/pwctl.py pubkey
-.venv/bin/python tools/pwctl.py sign-vote --chain-id cosmoshub-4 --height 1000
-.venv/bin/python tools/pwctl.py bench --count 1000 --start-height 10000
+make repl
+# at the prompt:
+os.info                            # firmware version + SDK version
 
-# Gno SecretConnection + amino privval (port 26659)
+# Configure a cosmos chain: device dials cometbft's priv_validator_laddr
+os.cosmos.chain.add hub cosmoshub-4 192.168.7.2 26690 [<pubkey-hex>]
+os.cosmos.chain.list
+
+# Configure a gno chain: gnoland dials the device's listener at <port>
+os.gno.chain.add test test3 26659 [<pubkey-hex>]
+os.gno.chain.list
+
+# Maintenance
+os.cosmos.chain.remove hub
+os.gno.chain.remove test
+os.chain.wipe                      # both families, full reset
+os.hwm_wipe                        # double-sign cache (for fresh testnet runs)
+```
+
+Per-chain settings are flash-persisted. The optional pubkey is the peer's
+SecretConnection long-term key; if set, only that exact key authenticates
+to that slot (mismatches close the connection immediately after handshake).
+A connection's sign requests are also strictly checked against the slot's
+chain_id -- a peer cannot request signatures for a different chain.
+
+#### PrivVal-mode tests
+
+Boot into PrivVal mode (RIGHT) once at least one chain is configured.
+
+```sh
+# Gno SecretConnection + amino privval (uses whichever port your gno
+# slot binds; defaults shown match `os.gno.chain.add test test3 26659`).
 .venv/bin/python tools/pwctl.py gno-sc-handshake --sign-height 1000000
 
 # Or, shorthand:
@@ -150,22 +180,11 @@ make test
 ```
 
 Every returned signature is verified host-side against the device's
-authenticated pubkey. `bench` reports p50/p90/p95/p99 latency.
+authenticated pubkey.
 
-#### TMKMS-mode admin
-
-```sh
-make repl
-# at the prompt:
-os.info                            # firmware version + SDK version
-os.auth_list                       # 0 (permissive) by default
-os.auth_add <64-hex-pubkey>        # pin a peer pubkey
-os.auth_clear                      # back to permissive
-```
-
-Allowlist is flash-persisted. With keys pinned, gno SecretConnection peers
-that authenticate to a non-matching pubkey are dropped immediately after
-the handshake completes.
+Cosmos paths are exercised end-to-end via the integration testnet (see
+[`scripts/README.md`](scripts/README.md)); pwctl no longer has a direct
+"dial the device's cosmos listener" mode since the device only dials out.
 
 ---
 
