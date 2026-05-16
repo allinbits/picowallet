@@ -91,7 +91,7 @@ static const char *const usbd_desc_str[] = {
 
 // Required by TinyUSB's ECM/RNDIS class driver. Set to a locally-administered
 // MAC (bit 1 of first byte set). The corresponding netif MAC differs by one
-// bit and is configured by the lwIP init in Stage 2c step 3.
+// bit and is configured by the lwIP netif init in PrivVal mode.
 uint8_t tud_network_mac_address[6] = { 0x02, 0x02, 0x84, 0x6A, 0x96, 0x00 };
 
 const uint8_t *tud_descriptor_device_cb(void) {

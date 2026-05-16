@@ -359,7 +359,9 @@ picowallet/
 │       └── apps/
 │           ├── cosmos/
 │           │   ├── app.{h,c}
-│           │   └── privval.{h,c}                 protobuf privval (plaintext today)
+│           │   ├── privval.{h,c}                 protobuf privval over SC
+│           │   ├── secret_connection_cosmos.{h,c} Merlin handshake
+│           │   └── sc_driver_cosmos.{h,c}        TCP driver (listener or dialer)
 │           └── gnoland/
 │               ├── app.{h,c}
 │               ├── secret_connection_gno.{h,c}   HKDF-only handshake

@@ -89,7 +89,7 @@ int main(void) {
     {
         char buf[40];
         snprintf(buf, sizeof(buf), "mode: %s%s", os_mode_name(os_current_mode),
-                 os_current_mode == OS_MODE_PRIVVAL ? " (USB-ETH, Stage 2)" : " (USB-CDC)");
+                 os_current_mode == OS_MODE_PRIVVAL ? " (USB-ETH)" : " (USB-CDC)");
         console_log(buf);
     }
     console_log("Installed apps:");
