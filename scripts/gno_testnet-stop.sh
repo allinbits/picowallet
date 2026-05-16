@@ -3,7 +3,7 @@
 set -euo pipefail
 TESTNET_DIR="${TESTNET_DIR:-$HOME/.picowallet-gno-testnet}"
 
-for pidfile in "$TESTNET_DIR"/gnoland.pid; do
+for pidfile in "$TESTNET_DIR"/gnoland.pid "$TESTNET_DIR"/node*.pid; do
     [ -f "$pidfile" ] || continue
     pid=$(cat "$pidfile")
     if kill -0 "$pid" 2>/dev/null; then

@@ -123,3 +123,102 @@ For situations where the device firmware can only listen (no dialer), set
 (cometbft's priv_validator_laddr listener and the device's listener on
 26660) and pipe bytes between them. Slower iteration loop (TCP forwarder
 in the middle) but lets you skip reflashing.
+
+---
+
+## gno_testnet.sh — 4-validator gnoland testnet with picowallet as remote signer
+
+Same shape as the cosmos demo, but for gnoland. The validator polarity is
+inverted: gnoland DIALS the signer instead of the signer dialing gnoland.
+So the device runs in its default **listener mode** (port 26659) -- no
+firmware reflash needed when switching between the two demos. (The single
+dialer-build firmware happens to satisfy both: cosmos outbound + gno
+listener coexist in the same image.)
+
+```
+  ┌──────────────┐                           ┌──────────────┐
+  │ gnoland 0    │ <── persistent peers ──>  │ gnoland 1    │
+  │ p2p :29656   │     (loopback mesh,       │ p2p :29666   │
+  │ rpc :29657   │      4 nodes total)       │ rpc :29667   │
+  └──────────────┘                           └──────────────┘
+              │                               │
+              v                               v
+  ┌──────────────┐                           ┌──────────────┐
+  │ gnoland 2    │                           │ gnoland 3    │  remote_signer
+  │ p2p :29676   │                           │ p2p :29686   │ ───────────────┐
+  │ rpc :29677   │                           │ rpc :29687   │                v
+  └──────────────┘                           └──────────────┘     ┌──────────────────┐
+                                                                  │ picowallet       │
+                                                                  │ listener :26659  │
+                                                                  │ USB-Ethernet     │
+                                                                  └──────────────────┘
+```
+
+### One-time prerequisites
+
+1. **gnoland built from /Volumes/Tendermint/gnolang/gno master**:
+   ```
+   cd /Volumes/Tendermint/gnolang/gno/gno.land
+   go build -o ~/go/bin/gnoland ./cmd/gnoland
+   ```
+2. **picowallet flashed with the same listener-capable firmware as
+   cosmos** (the dialer-build picowallet.uf2 works fine here since gno's
+   listener mode is independent of cosmos's dialer mode).
+
+### Per-run workflow
+
+1. Boot the device into TMKMS mode briefly to reset device-side state:
+   ```
+   os.auth_clear        # allowlist empty -> permissive
+   os.hwm_wipe          # HWM table empty -> no double-sign false-positives
+   ```
+2. Boot back into PrivVal mode. Confirm `val: <hex>` matches your
+   `PICOWALLET_PUBKEY_HEX` env var.
+3. Run:
+   ```
+   PICOWALLET_PUBKEY_HEX=<64-hex-chars> ./scripts/gno_testnet.sh
+   ```
+   This:
+   - Initializes 4 nodes' secrets and configs.
+   - Bootstraps a template genesis once with `gnoland start -lazy` (using
+     empty genesis txs + skip flags to bypass gno.land's pre-baked
+     manfred-signed bootstrap transactions).
+   - Hand-assembles a 4-validator genesis (node0/1/2 use their local
+     pubkeys, node3 uses the picowallet's).
+   - Distributes the genesis + wires `persistent_peers` using each node's
+     bech32 node ID.
+   - Flips `allow_duplicate_ip=true` and `addr_book_strict=false` (same
+     loopback gotchas as cosmos).
+   - Sets node3's `consensus.priv_validator.remote_signer.server_address
+     = tcp://192.168.7.1:26659`.
+   - Starts all 4 nodes.
+
+Confirm node3 is co-signing every block:
+```
+curl -s 'http://127.0.0.1:29657/block?height=5' | \
+    jq '.result.block.last_commit.precommits | map(select(.signature != null)) | length'
+# expect 4
+```
+
+### Stopping
+
+```
+./scripts/gno_testnet-stop.sh
+```
+
+---
+
+## Running both demos simultaneously
+
+The cosmos and gno demos use disjoint ports (28xxx vs 29xxx for cometbft
+P2P/RPC, plus 26690 for cosmos remote-signer listener vs 26659 for the
+device's gno listener). The dialer-build firmware exposes both endpoints
+at once, so the same physical picowallet can sign for both chains in
+parallel:
+
+```
+PICOWALLET_PUBKEY_HEX=... ./scripts/testnet.sh         # cosmos
+PICOWALLET_PUBKEY_HEX=... ./scripts/gno_testnet.sh     # gno
+```
+
+Each chain gets its own HWM slot on the device (one per `chain_id`).
