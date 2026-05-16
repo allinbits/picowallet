@@ -20,9 +20,7 @@
 
 #include "apps/cosmos/sc_driver_cosmos.h"
 #include "apps/gnoland/sc_driver.h"
-#include "apps/dialer_test.h"
 #include "os/api.h"
-#include "os/ui/console.h"
 #include "os/storage/hwm_flash.h"
 #include "os/storage/auth_keys.h"
 
@@ -83,7 +81,6 @@ int main(void) {
 
         gno_sc_driver_init();       // gno SecretConnection            (port 26659)
         cosmos_sc_driver_init();    // cometbft SecretConnection+Merlin (port 26660)
-        dialer_test_init();         // no-op unless -DDIAL_TEST_HOST=... at build
     }
 
     int failures = app_registry_init_all();
@@ -121,7 +118,6 @@ int main(void) {
             // PrivVal: service lwIP -- frames in, TCP responses out. No CDC.
             eth_service();
             cosmos_sc_driver_service(); // dialer retries; no-op in listener mode
-            dialer_test_service();      // no-op unless -DDIAL_TEST_HOST=... at build
 
             // Lazily refresh the on-device console at most every 10 s,
             // and only when there's something new to draw. Full refresh

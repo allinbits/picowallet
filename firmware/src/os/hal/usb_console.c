@@ -1,5 +1,3 @@
-#include <stdio.h>
-#include <stdarg.h>
 #include <string.h>
 
 #include "os/hal/usb_console.h"
@@ -49,11 +47,4 @@ int usb_console_poll_line(char *out, size_t maxlen) {
         usb_cdc_putchar(c);
     }
     return -1;
-}
-
-void usb_console_printf(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    vprintf(fmt, args);
-    va_end(args);
 }

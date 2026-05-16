@@ -285,10 +285,9 @@ static err_t on_accept(void *arg, struct tcp_pcb *pcb, err_t err) {
 #ifndef COSMOS_SC_DIAL_RETRY_MS
 #define COSMOS_SC_DIAL_RETRY_MS 3000
 #endif
-// Settling time after USB enumerates before the first dial. The diagnostic
-// dialer-test build (apps/dialer_test.c) proved that issuing tcp_connect
-// before tud_ready() + a brief stabilization window is what was wedging the
-// netif; this constant is the same shape that test used.
+// Settling time after USB enumerates before the first dial. Issuing
+// tcp_connect before tud_ready() + a brief stabilization window wedges the
+// netif on macOS hosts.
 #ifndef COSMOS_SC_DIAL_STABILIZE_TICKS
 #define COSMOS_SC_DIAL_STABILIZE_TICKS 1000
 #endif

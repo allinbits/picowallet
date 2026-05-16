@@ -7,5 +7,3 @@ void usb_console_init(void);
 // copies it (without terminator) into `out` and returns its length (>= 0).
 // If no line is ready yet, returns -1. Echoes characters and handles backspace.
 int usb_console_poll_line(char *out, size_t maxlen);
-
-void usb_console_printf(const char *fmt, ...);

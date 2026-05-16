@@ -58,7 +58,6 @@ add_executable(picowallet
     src/apps/gnoland/secret_connection_gno.c
     src/apps/gnoland/sc_driver.c
     src/apps/gnoland/gno_privval.c
-    src/apps/dialer_test.c
     ${WS_LIB}/Config/DEV_Config.c
     ${WS_LIB}/e-Paper/EPD_3in7.c
     ${WS_LIB}/GUI/GUI_Paint.c
