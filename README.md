@@ -157,7 +157,8 @@ os.gno.chain.list
 os.cosmos.chain.remove hub
 os.gno.chain.remove test
 os.chain.wipe                      # both families, full reset
-os.hwm_wipe                        # double-sign cache (for fresh testnet runs)
+os.hwm.list                        # show HWM state per chain slot
+os.hwm.wipe                        # erase all HWM state (fresh testnet runs)
 ```
 
 Per-chain settings are flash-persisted. The optional pubkey is the peer's

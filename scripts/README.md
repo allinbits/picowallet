@@ -44,7 +44,7 @@ dial target is cometbft's `priv_validator_laddr`, exposed by node3 on
 
 ```
 os.chain.wipe                                           # clear any prior slots
-os.hwm_wipe                                             # fresh testnet chain_id = fresh HWM
+os.hwm.wipe                                             # fresh testnet chain_id = fresh HWM
 os.cosmos.chain.add hub <CHAIN_ID> 192.168.7.2 26690    # no pinned key (permissive)
 ```
 
@@ -159,7 +159,7 @@ coexist in the same image without any rebuild between demos.
 1. Boot the device into TMKMS mode and configure a gno slot:
    ```
    os.chain.wipe                                # clear any prior slots
-   os.hwm_wipe                                  # fresh chain_id -> fresh HWM
+   os.hwm.wipe                                  # fresh chain_id -> fresh HWM
    os.gno.chain.add test <CHAIN_ID> 26659       # no pinned key (permissive)
    ```
    `<CHAIN_ID>` must match what gno_testnet.sh generates (set

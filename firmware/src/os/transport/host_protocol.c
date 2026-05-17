@@ -100,7 +100,8 @@ void host_protocol_print_help(void) {
     usb_cdc_printf("  gno.chain.remove <label>\r\n");
     usb_cdc_printf("  gno.chain.list\r\n");
     usb_cdc_printf("  chain.wipe                             erase all chain config slots\r\n");
-    usb_cdc_printf("  hwm_wipe                               erase all HWM state\r\n");
+    usb_cdc_printf("  hwm.list                               show current HWM state per slot\r\n");
+    usb_cdc_printf("  hwm.wipe                               erase all HWM state\r\n");
     usb_cdc_printf("  help                                   show this message\r\n");
     usb_cdc_printf("\r\nApp commands (<app>.<cmd>):\r\n");
     usb_cdc_printf("  cosmos.info, cosmos.ping\r\n");
@@ -296,9 +297,46 @@ static int dispatch_os(const char *cmd, const char *args,
         snprintf(reply, reply_size, "wiped");
         return 0;
     }
-    if (strcmp(cmd, "hwm_wipe") == 0) {
+    if (strcmp(cmd, "hwm.wipe") == 0) {
         hwm_flash_wipe();
         snprintf(reply, reply_size, "hwm wiped");
+        return 0;
+    }
+    if (strcmp(cmd, "hwm.list") == 0) {
+        // One line per in-use chain config slot, in the same order as
+        // os.cosmos.chain.list + os.gno.chain.list.
+        static const char *step_name[] = {
+            [0]    = "-",        // never signed
+            [0x01] = "prevote",
+            [0x02] = "precommit",
+            [0x20] = "proposal",
+        };
+        size_t total = 0;
+        for (int family = 0; family < 2; family++) {
+            chains_family_t fam = (family == 0)
+                ? CHAINS_FAMILY_COSMOS : CHAINS_FAMILY_GNO;
+            const char *fam_name = (family == 0) ? "cosmos" : "gno";
+            for (size_t i = 0; i < CHAINS_MAX_PER_FAMILY; i++) {
+                const chain_slot_t *s = chains_get(fam, i);
+                if (!s->in_use) continue;
+                uint8_t hi = chains_hwm_slot_idx(fam, i);
+                hwm_state_t st = hwm_current(hi);
+                const char *step =
+                    ((unsigned)st.type < sizeof(step_name)/sizeof(step_name[0])
+                     && step_name[st.type]) ? step_name[st.type] : "?";
+                if (st.height == 0 && st.round == 0 && st.type == 0) {
+                    usb_cdc_printf("  %-6s %-16s chain_id=%s (no signs yet)\r\n",
+                                   fam_name, s->label, s->chain_id);
+                } else {
+                    usb_cdc_printf("  %-6s %-16s chain_id=%s "
+                                   "h=%lld r=%d t=%s\r\n",
+                                   fam_name, s->label, s->chain_id,
+                                   (long long)st.height, (int)st.round, step);
+                }
+                total++;
+            }
+        }
+        snprintf(reply, reply_size, "%zu active slot(s)", total);
         return 0;
     }
     if (strcmp(cmd, "pubkey") == 0) {

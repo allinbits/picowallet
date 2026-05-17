@@ -36,7 +36,8 @@
 # Prerequisites:
 #   * gnoland built from /Volumes/Tendermint/gnolang/gno master.
 #   * picowallet flashed and booted to PrivVal mode.
-#   * Device-side: os.auth_clear (allowlist empty -> permissive), os.hwm_wipe.
+#   * Device-side TMKMS REPL: os.chain.wipe + os.hwm.wipe, then
+#     os.gno.chain.add <label> <chain_id> <port> [<pubkey_hex>] for this run.
 
 set -euo pipefail
 
