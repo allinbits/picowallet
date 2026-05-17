@@ -329,19 +329,117 @@ chain B.
   regardless of how many other chains are configured (real flash 2-5×
   → 20-45y in practice).
 
-### ◯ M9 — TrustZone split
+### ◯ M9 — TrustZone-M split
 
-Pico 2's Cortex-M33 supports TrustZone. Goal: move keystore + HWM + AEAD
-into the secure world; non-secure world owns USB / lwIP / display / apps.
+Goal: hold the seed and Ed25519 signing in the Secure world so a full
+compromise of USB / lwIP / parser code in the Non-Secure world cannot
+extract the validator's private key. Everything else (transport,
+parsing, UI, even most of the OS) stays Non-Secure.
 
-Subtasks:
-- Define secure-gateway ABI (the shared functions in `os/api.h` become
-  cross-world calls)
-- Linker scripts for secure / non-secure split
-- ITCM/DTCM allocation for secure code
-- MPU configuration
-- Verify HWM, keystore, chain config all live in secure world
-- Re-test the whole stack
+#### M9.1 — Boundary design
+
+**Secure world (small):**
+- The seed (`firmware/src/os/crypto/keystore.c`'s `TEST_SEED` today;
+  PIN-unwrapped flash in a later milestone)
+- SLIP-10 derivation
+- Ed25519 sign + the SHA-512 it needs (`monocypher-ed25519.c` subset)
+- HWM strict-advance check and append (`hwm_flash.c`) — see below
+- The flash-erase / flash-program ROM calls touched by the above
+
+**Non-secure world (everything else):**
+- USB stack, lwIP, ECM netif (already designed assuming flat memory)
+- SC handshake (X25519, ChaCha20-Poly1305, HKDF, Ed25519 *verify*)
+- chains config table + REPL
+- privval parsers (cosmos protobuf, gno amino)
+- canonical sign-bytes extraction
+- UI, console, display, factory reset
+
+The boundary is enforced by ACCESSCTRL + SAU. The Non-Secure side gets
+its own copy of Monocypher (X25519, ChaCha20-Poly1305, Ed25519 verify);
+the Ed25519 *sign* path is only in the Secure copy.
+
+**Secure-callable veneer (the only entries into Secure):**
+
+```
+int  s_get_pubkey(uint8_t curve, const char *path,
+                  uint8_t *out_pubkey, size_t out_size, size_t *out_len);
+
+int  s_sign_and_advance(uint8_t curve, const char *path,
+                        uint8_t hwm_slot_idx, int32_t type,
+                        int64_t height, int32_t round,
+                        const uint8_t *data, size_t data_len,
+                        uint8_t out_sig[64]);
+
+const char *s_status_str(int status);  // optional convenience
+```
+
+`s_sign_and_advance` is the key change versus today's `os_crypto_sign`:
+it takes the slot index + (type, height, round) tuple and *atomically*
+advances the HWM before signing. Non-Secure code cannot bypass the
+double-sign check by skipping a `hwm_advance` call. Non-Secure can lie
+about (h, r, t) but only to push the HWM forward -- the seed never
+leaks, and the worst attacker outcome is bricking the validator (HWM
+permanently advanced past usable heights), which is much weaker than
+key extraction.
+
+`os_crypto_sign` and `hwm_advance` on the Non-Secure side become thin
+wrappers around `s_sign_and_advance`. The current call-site shape is
+preserved.
+
+#### M9.2 — Implementation plan (phased)
+
+`pico-sdk` 2.2.0 ships SAU + ACCESSCTRL register definitions and the
+Cortex-M33 CMSIS core header, but *no* middleware: no NSC veneer
+helpers, no S/NS linker script template, no example apps. The split is
+expected to be built from scratch on top of those primitives.
+
+- **Phase 0 — Boundary hygiene (this milestone, partly done already).**
+  Confirm that no app/transport code reaches into the keystore or
+  Monocypher signing functions outside of `os_crypto_*`. (Currently:
+  only `bench.c` calls `crypto_ed25519_*` directly with a local seed --
+  fine, since the seed is a local fixture, not the real keystore.)
+  Document the secure-callable veneer signatures above as the M9
+  ABI.
+- **Phase 1 — Linker + memory layout.** Carve flash into S / NSC / NS
+  regions; carve SRAM the same way. Configure SAU on boot from the
+  Secure side, then `BLXNS` to the Non-Secure entry point.
+- **Phase 2 — Veneer entries.** Write `s_get_pubkey`,
+  `s_sign_and_advance`, `s_status_str` as `cmse_nonsecure_entry`
+  functions in the Secure image. Validate buffer pointers on entry
+  using ARM's `cmse_check_pointed_object` helpers.
+- **Phase 3 — Build system.** Split the CMake build into two static
+  libraries + two link steps + a final UF2 that packs both images.
+- **Phase 4 — ACCESSCTRL.** Configure ACCESSCTRL to:
+  - Allow Non-Secure access to USB / GPIO / SPI (for display) / lwIP-
+    relevant peripherals + the host CDC.
+  - Restrict TRNG access to Secure-only (default already; verify).
+  - Hardware SHA-256 stays accessible from both worlds (it's used by
+    the SC HKDF path on the NS side).
+- **Phase 5 — TinyUSB + lwIP audit.** Both assume a flat memory map.
+  Confirm their DMA descriptors and pbuf pools live entirely in NS
+  memory and don't try to reach into S regions; refactor if needed.
+- **Phase 6 — End-to-end revalidation.** Re-run `make test` (gno
+  handshake) and both testnet scripts. Add a negative test: NS code
+  attempting to read the seed region should fault.
+
+#### M9.3 — Risks / open questions
+
+- **bench.c.** Currently calls Monocypher directly. Will need to use
+  the NS copy of Monocypher (same library, different link unit), or be
+  removed -- it's a microbenchmark, not load-bearing.
+- **pico_sha256, pico_rand.** TRNG defaults to Secure-Privileged-only;
+  the NS-side SC handshake uses `pico_rand_get_bytes` for ephemerals
+  via the existing TRNG-backed PRNG. Either expose TRNG to NS via
+  ACCESSCTRL NSP bit, or have the NS side dual-source entropy from
+  Secure via a small veneer (`s_random(out, n)`).
+- **Memory cost.** Two copies of Monocypher's X25519 + SHA + AEAD (one
+  per world). Code size impact ~5-10 KB doubled = acceptable on 4 MB
+  flash.
+- **Build complexity.** Two ELFs, dual link, UF2 packaging. Manual
+  scaffold required; no SDK helper.
+- **First-time bringup risk.** SAU misconfiguration on boot is a hard-
+  fault-on-every-instruction class problem. Plan to keep an "escape
+  hatch" build flag during development that disables the split.
 
 ### ◯ M10 — Signed firmware + OTP fuse
 
