@@ -275,17 +275,15 @@ Subtasks:
   on port 26660; shared `secret_connection.c` frame layer (AEAD + HKDF
   identical to gno). The driver was later rewritten to a per-chain
   dialer in M8 (cometbft expects the signer to dial in).
-- ✓ Pure-Python Merlin in `tools/merlin.py`, byte-for-byte matched to the
-  C implementation (same test vectors pass both sides).
-- ✓ `pwctl.py cosmos-sc-handshake` — full handshake driver using the Python
-  Merlin + protobuf-delimited wire. Awaiting device flash for integration
-  verification.
+- ✓ Pure-Python Merlin (`tools/merlin.py`) + `pwctl.py cosmos-sc-handshake`
+  drove the host-side handshake during M6 development, byte-for-byte
+  matched to the C implementation. Both were removed in e7ed4e8 once
+  cosmos became dialer-only and pwctl had no listener to dial into.
 - ✓ Wire the existing protobuf privval state machine through the encrypted
   frame layer. `apps/cosmos/privval.c` was refactored to take a `privval_sink_t`
   (write/flush callback) instead of a `tcp_pcb` directly; `sc_driver_cosmos.c`
   buffers each response frame then seals it. Plaintext listener on 26658
-  removed in the same commit. pwctl pubkey/sign-vote/sign-proposal/replay/bench
-  all run over SC now. Verified end-to-end against the device.
+  removed in the same commit. Verified end-to-end against the device.
 - ◯ Integration test against a stock cometbft v0.38 validator listener.
 
 ### ✓ M7 — Testnet integration against real validators
@@ -455,6 +453,6 @@ least one configured gno chain slot whose port matches what pwctl dials.
 Cosmos paths are exercised end-to-end via `scripts/testnet.sh` (real
 4-validator cosmos-sdk testnet with node3 using the device as its
 remote signer). The cosmos client-mode pwctl subcommands (`pubkey`,
-`sign-vote`, `sign-proposal`, `replay`, `bench`) targeted the old
-listener that was removed in M8; revive them by adding a listener mode
-to pwctl, or rely on the testnet harness.
+`sign-vote`, `sign-proposal`, `replay`, `bench`, `cosmos-sc-handshake`)
+were deleted in e7ed4e8 once cosmos went dialer-only; reviving any of
+them would require adding a fake-cometbft listener mode to pwctl.
