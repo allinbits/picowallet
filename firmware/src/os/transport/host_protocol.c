@@ -80,6 +80,33 @@ static void reply_err(const char *reason) {
     }
 }
 
+void host_protocol_print_help(void) {
+    usb_cdc_printf("OS commands (os.*):\r\n");
+    usb_cdc_printf("  info                                   firmware version + SDK\r\n");
+    usb_cdc_printf("  ping                                   liveness check\r\n");
+    usb_cdc_printf("  mode                                   current mode (TMKMS/PrivVal)\r\n");
+    usb_cdc_printf("  apps                                   list installed apps\r\n");
+    usb_cdc_printf("  refresh                                queue a full e-paper refresh\r\n");
+    usb_cdc_printf("  clear                                  clear on-device console history\r\n");
+    usb_cdc_printf("  led on|off                             LED control\r\n");
+    usb_cdc_printf("  btn                                    read button state\r\n");
+    usb_cdc_printf("  pubkey <curve> [<path>]                derive pubkey (curve: ed25519|secp256k1; path defaults to m)\r\n");
+    usb_cdc_printf("  sign <curve> <path> <hex_data>         sign raw bytes\r\n");
+    usb_cdc_printf("  bench ed25519                          on-device sign+verify benchmark\r\n");
+    usb_cdc_printf("  cosmos.chain.add <label> <chain_id> <host> <port> [<pubkey_hex>]\r\n");
+    usb_cdc_printf("  cosmos.chain.remove <label>\r\n");
+    usb_cdc_printf("  cosmos.chain.list\r\n");
+    usb_cdc_printf("  gno.chain.add <label> <chain_id> <port> [<pubkey_hex>]\r\n");
+    usb_cdc_printf("  gno.chain.remove <label>\r\n");
+    usb_cdc_printf("  gno.chain.list\r\n");
+    usb_cdc_printf("  chain.wipe                             erase all chain config slots\r\n");
+    usb_cdc_printf("  hwm_wipe                               erase all HWM state\r\n");
+    usb_cdc_printf("  help                                   show this message\r\n");
+    usb_cdc_printf("\r\nApp commands (<app>.<cmd>):\r\n");
+    usb_cdc_printf("  cosmos.info, cosmos.ping\r\n");
+    usb_cdc_printf("  gnoland.info, gnoland.ping\r\n");
+}
+
 static int dispatch_os(const char *cmd, const char *args,
                        char *reply, size_t reply_size) {
     if (strcmp(cmd, "info") == 0) {
@@ -87,6 +114,11 @@ static int dispatch_os(const char *cmd, const char *args,
                  PICO_SDK_VERSION_MAJOR,
                  PICO_SDK_VERSION_MINOR,
                  PICO_SDK_VERSION_REVISION);
+        return 0;
+    }
+    if (strcmp(cmd, "help") == 0) {
+        host_protocol_print_help();
+        snprintf(reply, reply_size, "help");
         return 0;
     }
     if (strcmp(cmd, "ping") == 0) {

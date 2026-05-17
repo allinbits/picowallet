@@ -138,10 +138,10 @@ int main(void) {
         if (now_connected && !prev_connected) {
             sleep_ms(50);  // let the host settle before sending bytes
             usb_cdc_printf("\r\n=== PicoWallet " PICOWALLET_BUILD " ===\r\n");
-            usb_cdc_printf("Mode: %s\r\n", os_mode_name(os_current_mode));
-            usb_cdc_printf("Protocol: <app>.<cmd> [args];  OS via os.*\r\n");
-            usb_cdc_printf("Try: os.info, os.apps, os.pubkey, cosmos.info, gnoland.info\r\n");
-            usb_cdc_printf("> ");
+            usb_cdc_printf("Mode: %s (admin REPL)\r\n", os_mode_name(os_current_mode));
+            usb_cdc_printf("Protocol: <namespace>.<cmd> [args]\r\n\r\n");
+            host_protocol_print_help();
+            usb_cdc_printf("\r\n> ");
         }
         prev_connected = now_connected;
 

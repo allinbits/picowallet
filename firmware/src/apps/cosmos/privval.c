@@ -66,22 +66,6 @@ static int pb_read_varint(const uint8_t *buf, size_t len,
     return -1;  // truncated
 }
 
-// Tendermint privval.Message oneof field numbers. The first tag in an
-// incoming frame tells us which variant the host sent.
-static const char *msg_type_name(uint32_t field) {
-    switch (field) {
-        case 1: return "PubKeyRequest";
-        case 2: return "PubKeyResponse";
-        case 3: return "SignVoteRequest";
-        case 4: return "SignedVoteResponse";
-        case 5: return "SignProposalRequest";
-        case 6: return "SignedProposalResponse";
-        case 7: return "PingRequest";
-        case 8: return "PingResponse";
-        default: return "Unknown";
-    }
-}
-
 // ===========================================================================
 // Minimal protobuf decoder
 // ===========================================================================
@@ -612,30 +596,31 @@ static size_t encode_canonical_proposal(uint8_t *buf, const sign_request_t *r) {
 static void handle_sign_vote(privval_state_t *st, privval_sink_t *sink,
                              const uint8_t *inner, size_t inner_len) {
     sign_request_t r;
+    char log[96];
     if (decode_sign_request_with(inner, inner_len, &r,
                                  decode_inner_vote_or_proposal) < 0) {
-        os_console_log("privval: bad sign request");
+        snprintf(log, sizeof(log), "cosmos-sc[%s]: bad sign request", st->slot_label);
+        os_console_log(log);
         send_error_in(sink, 4, 2, "decode_failed");
         return;
     }
 
-    char log[80];
-    snprintf(log, sizeof(log), "vote: t=%d h=%lld r=%d",
-             (int)r.type, (long long)r.height, (int)r.round);
-    os_console_log(log);
-
     if (strcmp(r.chain_id, st->expected_chain_id) != 0) {
-        char m[96];
-        snprintf(m, sizeof(m), "vote: chain_id_mismatch got=%.32s want=%.32s",
-                 r.chain_id, st->expected_chain_id);
-        os_console_log(m);
+        snprintf(log, sizeof(log),
+                 "cosmos-sc[%s]: chain_id_mismatch got=%.32s want=%.32s",
+                 st->slot_label, r.chain_id, st->expected_chain_id);
+        os_console_log(log);
         send_error_in(sink, 4, 2, "chain_id_mismatch");
         return;
     }
 
     if (!hwm_advance(st->hwm_slot_idx, r.chain_id, strlen(r.chain_id),
                      r.type, r.height, r.round)) {
-        os_console_log("vote: HWM reject (double-sign)");
+        snprintf(log, sizeof(log),
+                 "cosmos-sc[%s]: double_sign_refused %.20s t=%d h=%lld r=%d",
+                 st->slot_label, r.chain_id,
+                 (int)r.type, (long long)r.height, (int)r.round);
+        os_console_log(log);
         send_error_in(sink, 4, 2, "double_sign_refused");
         return;
     }
@@ -655,7 +640,8 @@ static void handle_sign_vote(privval_state_t *st, privval_sink_t *sink,
     int rc = os_crypto_sign(OS_CURVE_ED25519, VALIDATOR_KEY_PATH,
                             sign_in, sign_in_len, sig);
     if (rc != 0) {
-        os_console_log("vote: sign failed");
+        snprintf(log, sizeof(log), "cosmos-sc[%s]: sign failed", st->slot_label);
+        os_console_log(log);
         send_error_in(sink, 4, 2, "sign_failed");
         return;
     }
@@ -679,36 +665,42 @@ static void handle_sign_vote(privval_state_t *st, privval_sink_t *sink,
     size_t  outer_n = pb_write_bytes(outer, 4, resp, resp_n);
 
     send_framed(sink, outer, outer_n);
-    os_console_log("vote: SIGNED");
+    snprintf(log, sizeof(log),
+             "cosmos-sc[%s]: signed %.20s t=%d h=%lld r=%d",
+             st->slot_label, r.chain_id,
+             (int)r.type, (long long)r.height, (int)r.round);
+    os_console_log(log);
 }
 
 static void handle_sign_proposal(privval_state_t *st, privval_sink_t *sink,
                                  const uint8_t *inner, size_t inner_len) {
     sign_request_t r;
+    char log[96];
     if (decode_sign_request_with(inner, inner_len, &r,
                                  decode_inner_proposal) < 0) {
-        os_console_log("privval: bad proposal request");
+        snprintf(log, sizeof(log),
+                 "cosmos-sc[%s]: bad proposal request", st->slot_label);
+        os_console_log(log);
         send_error_in(sink, 6, 2, "decode_failed");
         return;
     }
 
-    char log[80];
-    snprintf(log, sizeof(log), "prop: t=%d h=%lld r=%d pol=%d",
-             (int)r.type, (long long)r.height, (int)r.round, (int)r.pol_round);
-    os_console_log(log);
-
     if (strcmp(r.chain_id, st->expected_chain_id) != 0) {
-        char m[96];
-        snprintf(m, sizeof(m), "prop: chain_id_mismatch got=%.32s want=%.32s",
-                 r.chain_id, st->expected_chain_id);
-        os_console_log(m);
+        snprintf(log, sizeof(log),
+                 "cosmos-sc[%s]: chain_id_mismatch got=%.32s want=%.32s",
+                 st->slot_label, r.chain_id, st->expected_chain_id);
+        os_console_log(log);
         send_error_in(sink, 6, 2, "chain_id_mismatch");
         return;
     }
 
     if (!hwm_advance(st->hwm_slot_idx, r.chain_id, strlen(r.chain_id),
                      r.type, r.height, r.round)) {
-        os_console_log("prop: HWM reject (double-sign)");
+        snprintf(log, sizeof(log),
+                 "cosmos-sc[%s]: double_sign_refused %.20s t=%d h=%lld r=%d",
+                 st->slot_label, r.chain_id,
+                 (int)r.type, (long long)r.height, (int)r.round);
+        os_console_log(log);
         send_error_in(sink, 6, 2, "double_sign_refused");
         return;
     }
@@ -725,7 +717,8 @@ static void handle_sign_proposal(privval_state_t *st, privval_sink_t *sink,
     int rc = os_crypto_sign(OS_CURVE_ED25519, VALIDATOR_KEY_PATH,
                             sign_in, sign_in_len, sig);
     if (rc != 0) {
-        os_console_log("prop: sign failed");
+        snprintf(log, sizeof(log), "cosmos-sc[%s]: sign failed", st->slot_label);
+        os_console_log(log);
         send_error_in(sink, 6, 2, "sign_failed");
         return;
     }
@@ -749,12 +742,18 @@ static void handle_sign_proposal(privval_state_t *st, privval_sink_t *sink,
     size_t  outer_n = pb_write_bytes(outer, 6, resp, resp_n);
 
     send_framed(sink, outer, outer_n);
-    os_console_log("prop: SIGNED");
+    snprintf(log, sizeof(log),
+             "cosmos-sc[%s]: signed %.20s t=%d h=%lld r=%d",
+             st->slot_label, r.chain_id,
+             (int)r.type, (long long)r.height, (int)r.round);
+    os_console_log(log);
 }
 
 static void handle_frame(privval_state_t *st, privval_sink_t *sink) {
+    char log[80];
     if (st->body_len == 0) {
-        os_console_log("privval: empty frame");
+        snprintf(log, sizeof(log), "cosmos-sc[%s]: empty frame", st->slot_label);
+        os_console_log(log);
         send_ping_response(sink);
         return;
     }
@@ -762,14 +761,11 @@ static void handle_frame(privval_state_t *st, privval_sink_t *sink) {
     uint32_t field, wire;
     int tag_n = pb_read_tag(st->body, st->body_len, &field, &wire);
     if (tag_n < 0) {
-        os_console_log("privval: bad outer tag");
+        snprintf(log, sizeof(log), "cosmos-sc[%s]: bad outer tag", st->slot_label);
+        os_console_log(log);
         send_ping_response(sink);
         return;
     }
-
-    char log[64];
-    snprintf(log, sizeof(log), "privval: %s", msg_type_name(field));
-    os_console_log(log);
 
     // For message-typed variants, peel the length prefix and pass the inner
     // body to the type-specific handler. (Ping has empty body, no inner len.)
@@ -788,6 +784,9 @@ static void handle_frame(privval_state_t *st, privval_sink_t *sink) {
     switch (field) {
         case 1:  // PubKeyRequest
             send_pubkey_response(sink);
+            snprintf(log, sizeof(log),
+                     "cosmos-sc[%s]: served PubKeyRequest", st->slot_label);
+            os_console_log(log);
             break;
         case 3:  // SignVoteRequest
             handle_sign_vote(st, sink, inner, inner_len);
@@ -799,7 +798,10 @@ static void handle_frame(privval_state_t *st, privval_sink_t *sink) {
             send_ping_response(sink);
             break;
         default:
-            os_console_log("privval: unknown msg type");
+            snprintf(log, sizeof(log),
+                     "cosmos-sc[%s]: unknown msg type %u",
+                     st->slot_label, (unsigned)field);
+            os_console_log(log);
             send_ping_response(sink);
     }
 }
@@ -809,7 +811,8 @@ static void handle_frame(privval_state_t *st, privval_sink_t *sink) {
 
 void privval_reset_state(privval_state_t *st,
                          const char *expected_chain_id,
-                         uint8_t hwm_slot_idx) {
+                         uint8_t hwm_slot_idx,
+                         const char *slot_label) {
     state_reset_framing(st);
     memset(st->expected_chain_id, 0, sizeof(st->expected_chain_id));
     if (expected_chain_id) {
@@ -817,6 +820,10 @@ void privval_reset_state(privval_state_t *st,
                 sizeof(st->expected_chain_id) - 1);
     }
     st->hwm_slot_idx = hwm_slot_idx;
+    memset(st->slot_label, 0, sizeof(st->slot_label));
+    if (slot_label) {
+        strncpy(st->slot_label, slot_label, sizeof(st->slot_label) - 1);
+    }
 }
 
 // Feed a single byte into the frame state machine.

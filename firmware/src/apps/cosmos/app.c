@@ -1,8 +1,9 @@
 // Cosmos / Tendermint validator signer app.
 //
-// Long-term: implements Tendermint privval secret-connection over USB,
-// signs CanonicalVote / CanonicalProposal messages with HWM protection.
-// Today (M2): stub. Text commands only.
+// Signs CanonicalVote / CanonicalProposal messages for cometbft-class
+// chains. Signing logic lives in apps/cosmos/privval.c, driven by the
+// per-chain SC dialer in apps/cosmos/sc_driver_cosmos.c. This file is
+// the OS-facing app descriptor + the small TMKMS-REPL command surface.
 
 #include <string.h>
 #include <stdio.h>
@@ -23,7 +24,7 @@ static int cosmos_handle_cmd(const char *cmd, const char *args,
     }
     if (strcmp(cmd, "info") == 0) {
         snprintf(reply, reply_size,
-                 "Cosmos/Tendermint validator (privval pending M3)");
+                 "cometbft validator signer (SC dialer + protobuf privval)");
         return 0;
     }
     snprintf(reply, reply_size, "unknown_cmd: %s", cmd);

@@ -1,8 +1,9 @@
 // Gno.land validator signer app.
 //
-// Long-term: signs Gno consensus messages. Note: Gno does NOT use protobuf
-// for consensus messages -- exact format to be verified in source before M4.
-// Today (M2): stub. Text commands only.
+// Signs gno.land CanonicalVote / CanonicalProposal messages over the gno
+// SecretConnection variant (HKDF challenge, no Merlin). Wire encoding is
+// amino; the per-chain listener + parser live in apps/gnoland/sc_driver.c
+// and apps/gnoland/gno_privval.c. This file is the OS-facing descriptor.
 
 #include <string.h>
 #include <stdio.h>
@@ -23,7 +24,7 @@ static int gnoland_handle_cmd(const char *cmd, const char *args,
     }
     if (strcmp(cmd, "info") == 0) {
         snprintf(reply, reply_size,
-                 "Gno.land validator (canonical format research pending M4)");
+                 "gno.land validator signer (SC listener + amino privval)");
         return 0;
     }
     snprintf(reply, reply_size, "unknown_cmd: %s", cmd);

@@ -12,6 +12,7 @@
 
 #define PRIVVAL_FRAME_MAX        4096  // generous cap on a single privval message
 #define PRIVVAL_CHAIN_ID_MAX     48    // matches CHAINS_CHAIN_ID_MAX
+#define PRIVVAL_LABEL_MAX        16    // matches CHAINS_LABEL_MAX
 
 typedef struct {
     int      phase;      // PHASE_LEN (0) or PHASE_BODY (1)
@@ -27,6 +28,9 @@ typedef struct {
     // The HWM slot this connection's signs route to (see chains.h /
     // hwm_flash.h). Used as the slot argument to hwm_advance.
     uint8_t  hwm_slot_idx;
+    // Operator-facing slot label, used to prefix log lines so output
+    // mirrors the gno driver's "gno-sc[label]: ..." pattern.
+    char     slot_label[PRIVVAL_LABEL_MAX];
 } privval_state_t;
 
 typedef struct {
@@ -39,13 +43,15 @@ typedef struct {
 } privval_sink_t;
 
 // Reset a parser to expect a fresh uvarint length prefix and bind it to a
-// chain slot. The expected_chain_id is the slot's bound chain_id (sign
-// requests claiming a different one are refused). hwm_slot_idx identifies
-// the HWM region used for double-sign protection. Call once per new
+// chain slot. `expected_chain_id` is the slot's bound chain_id (sign
+// requests claiming a different one are refused). `hwm_slot_idx` identifies
+// the HWM region used for double-sign protection. `slot_label` is the
+// operator-facing tag used as a prefix on log output. Call once per new
 // connection.
 void privval_reset_state(privval_state_t *st,
                          const char *expected_chain_id,
-                         uint8_t hwm_slot_idx);
+                         uint8_t hwm_slot_idx,
+                         const char *slot_label);
 
 // Push a single byte through the parser. Returns 0 if all is well, -1 if
 // the connection should be closed (malformed/oversize frame).
