@@ -363,8 +363,8 @@ development.
 | | PIN unlock + key-at-rest encryption | Currently the keystore is at-rest in flash with no PIN gate |
 | | Multi-validator key selection | Hardcoded `m/0'` path; real product needs named keys + selection UX |
 | | Console paging / longer history | Console buffer is small; long logs lose old lines |
-| | Operational metrics over TMKMS REPL | Sign counter, HWM per chain, last error, etc. |
-| | Factory reset UX | `hwm_flash_wipe` exists; needs a long-press button confirmation flow |
+| | Operational metrics over TMKMS REPL | Sign counter, HWM per chain (the latter is now exposed via `os.hwm.list`); sign counter / last error still TODO |
+| ✓ | Factory reset UX | Hold both buttons for 5 s in TMKMS mode (or `os.factory_reset` REPL command) → confirm screen → chain config + HWM wiped. Validator key not touched. |
 
 ---
 

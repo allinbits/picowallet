@@ -21,6 +21,7 @@
 #include "apps/cosmos/sc_driver_cosmos.h"
 #include "apps/gnoland/sc_driver.h"
 #include "os/api.h"
+#include "os/ui/factory_reset.h"
 #include "os/storage/hwm_flash.h"
 #include "os/storage/chains.h"
 
@@ -144,6 +145,8 @@ int main(void) {
             usb_cdc_printf("\r\n> ");
         }
         prev_connected = now_connected;
+
+        factory_reset_check_trigger();
 
         int n = usb_console_poll_line(line, sizeof(line));
         if (n >= 0) {

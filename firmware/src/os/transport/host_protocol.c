@@ -17,6 +17,7 @@
 #include "os/mode.h"
 #include "os/storage/chains.h"
 #include "os/storage/hwm_flash.h"
+#include "os/ui/factory_reset.h"
 
 #define LED_PIN PICO_DEFAULT_LED_PIN
 #define REPLY_BUF 160
@@ -102,6 +103,8 @@ void host_protocol_print_help(void) {
     usb_cdc_printf("  chain.wipe                             erase all chain config slots\r\n");
     usb_cdc_printf("  hwm.list                               show current HWM state per slot\r\n");
     usb_cdc_printf("  hwm.wipe                               erase all HWM state\r\n");
+    usb_cdc_printf("  factory_reset                          confirm-then-wipe chains + HWM\r\n");
+    usb_cdc_printf("                                         (also: hold both buttons 5 s in TMKMS)\r\n");
     usb_cdc_printf("  help                                   show this message\r\n");
     usb_cdc_printf("\r\nApp commands (<app>.<cmd>):\r\n");
     usb_cdc_printf("  cosmos.info, cosmos.ping\r\n");
@@ -301,6 +304,14 @@ static int dispatch_os(const char *cmd, const char *args,
         hwm_flash_wipe();
         snprintf(reply, reply_size, "hwm wiped");
         return 0;
+    }
+    if (strcmp(cmd, "factory_reset") == 0) {
+        if (factory_reset_confirm()) {
+            snprintf(reply, reply_size, "wiped (chains + hwm)");
+            return 0;
+        }
+        snprintf(reply, reply_size, "cancelled");
+        return -1;
     }
     if (strcmp(cmd, "hwm.list") == 0) {
         // One line per in-use chain config slot, in the same order as

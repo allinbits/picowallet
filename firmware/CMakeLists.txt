@@ -30,6 +30,7 @@ add_executable(picowallet
     src/os/hal/usb_console.c
     src/os/ui/console.c
     src/os/ui/confirm.c
+    src/os/ui/factory_reset.c
     src/os/ui/splash.c
     src/os/ui/mode_select.c
     src/os/transport/host_protocol.c
