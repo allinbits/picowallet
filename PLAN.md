@@ -329,117 +329,198 @@ chain B.
   regardless of how many other chains are configured (real flash 2-5×
   → 20-45y in practice).
 
-### ◯ M9 — TrustZone-M split
+### ◯ M9 — TrustZone-M split (Ledger-style)
 
-Goal: hold the seed and Ed25519 signing in the Secure world so a full
-compromise of USB / lwIP / parser code in the Non-Secure world cannot
-extract the validator's private key. Everything else (transport,
-parsing, UI, even most of the OS) stays Non-Secure.
+Goal: hold the seed, all destructive state mutations, and the
+user-consent path (display + buttons) in the Secure world so a full
+compromise of TinyUSB / lwIP / parsers / SC handshake in the
+Non-Secure world cannot extract the seed, spoof prompts, or tamper
+with persistent state. NS becomes the "I/O processor": it parses
+untrusted bytes off USB/Ethernet and asks Secure to make every
+security-relevant decision.
 
-#### M9.1 — Boundary design
+#### M9.0 — Threat model
 
-**Secure world (small):**
-- The seed (`firmware/src/os/crypto/keystore.c`'s `TEST_SEED` today;
-  PIN-unwrapped flash in a later milestone)
-- SLIP-10 derivation
-- Ed25519 sign + the SHA-512 it needs (`monocypher-ed25519.c` subset)
-- HWM strict-advance check and append (`hwm_flash.c`) — see below
-- The flash-erase / flash-program ROM calls touched by the above
+| # | Attacker capability | M9 mitigation |
+|---|---|---|
+| 1 | Network attacker dialing PrivVal port | Out of scope of M9. Covered by SC handshake + HWM + chain_id binding (already shipped). |
+| 2 | MITM on USB-Ethernet link | Out of scope. Covered by per-chain pinned peer keys. |
+| 3 | Compromised peer that knows a valid SC long-term key | Out of scope. HWM, chain_id binding, and strict-advance bound damage to DoS-on-this-chain. |
+| 4 | **Runtime exploit in NS code** (TinyUSB / lwIP / privval parser / SC handshake) | **The primary thing M9 addresses.** NS cannot read the seed, cannot draw on the prompt region of the display, cannot modify chain config or HWM in flash, cannot inject button events into a Secure confirm flow. |
+| 5 | Logic bug in Secure code | Only mitigation is keeping Secure TCB small + reviewing it carefully. Veneer-validated pointers (`cmse_check_pointed_object`) catch shape-of-call mistakes; semantic bugs are on us. |
+| 6 | Physical adversary dumps QSPI flash externally | **Not addressed by M9.** Addressed by §M9.5 (encryption-at-rest + PIN). |
+| 7 | Physical adversary attaches SWD | ACCESSCTRL restricts DEBUG to NS world; M10 OTP fuse disables SWD entirely. M9 closes the SWD-into-Secure-memory path. |
+| 8 | Voltage / clock / EM glitching | Out of scope. |
+| 9 | Power / timing side channel | Monocypher is constant-time; specialised side-channel hardening is out of scope. |
 
-**Non-secure world (everything else):**
-- USB stack, lwIP, ECM netif (already designed assuming flat memory)
-- SC handshake (X25519, ChaCha20-Poly1305, HKDF, Ed25519 *verify*)
-- chains config table + REPL
-- privval parsers (cosmos protobuf, gno amino)
-- canonical sign-bytes extraction
-- UI, console, display, factory reset
+#### M9.1 — Boundary
 
-The boundary is enforced by ACCESSCTRL + SAU. The Non-Secure side gets
-its own copy of Monocypher (X25519, ChaCha20-Poly1305, Ed25519 verify);
-the Ed25519 *sign* path is only in the Secure copy.
+| | Secure | Non-Secure |
+|---|---|---|
+| Seed + SLIP-10 + Ed25519 *sign* + SHA-512 | ✓ | |
+| HWM table — **writes** | ✓ | reads via memory-mapped flash (data isn't secret) |
+| Chain config table — **writes** | ✓ | reads via memory-mapped flash |
+| Flash program/erase | ✓ (only Secure can mutate any flash region) | |
+| Display SPI peripheral + e-paper driver | ✓ — owns the panel; trusted prompts and console rendering both flow through Secure | |
+| Button GPIO + debounced events | ✓ — Secure polls inside confirm flows; otherwise forwards event taps to NS via a non-trusted veneer | |
+| TRNG, hardware SHA-256 peripheral | ✓ — Secure-only access in ACCESSCTRL | NS gets entropy via `s_random()` veneer |
+| LED (liveness blink) | | ✓ (cosmetic only) |
+| TinyUSB + CDC-ECM driver | | ✓ |
+| lwIP + ECM netif | | ✓ |
+| SC handshake (X25519, ChaCha20-Poly1305, HKDF, Ed25519 *verify*) | | ✓ |
+| Privval parsers (cosmos protobuf, gno amino) + canonical sign-bytes extraction | | ✓ |
+| REPL line dispatcher | | ✓ — invokes Secure veneers for state-changing commands |
+| Console line buffer (text content) | | ✓ — rendered by Secure |
 
-**Secure-callable veneer (the only entries into Secure):**
+NS keeps its own copy of Monocypher (X25519, ChaCha20-Poly1305,
+Ed25519 verify, SHA-256). Ed25519 *sign* + SHA-512 only exist in the
+Secure copy. Code-size cost of the duplicated subset: ~5-10 KB; on a
+4 MB flash this is irrelevant.
 
-```
+The display panel is shared in time, not in space: the Secure side
+owns the SPI peripheral and the rendering primitives. The console
+("here's a text line, please draw it") is a low-trust veneer NS calls.
+Trusted prompts are drawn exclusively by Secure into a reserved
+top-of-screen region; NS cannot influence what's shown during a
+Secure prompt and cannot drive the display peripheral itself.
+
+#### M9.2 — Secure-callable veneer (NSC ABI)
+
+```c
+// --- Crypto + signing -----------------------------------------------------
 int  s_get_pubkey(uint8_t curve, const char *path,
-                  uint8_t *out_pubkey, size_t out_size, size_t *out_len);
+                  uint8_t *out, size_t out_size, size_t *out_len);
 
+// Atomic: validate strict-advance against the slot's HWM, append the
+// new HWM record, sign the canonical bytes, return the signature.
+// Returns 0 on success; negative status_t on any failure.
 int  s_sign_and_advance(uint8_t curve, const char *path,
-                        uint8_t hwm_slot_idx, int32_t type,
-                        int64_t height, int32_t round,
+                        uint8_t hwm_slot_idx,
+                        int32_t type, int64_t height, int32_t round,
                         const uint8_t *data, size_t data_len,
                         uint8_t out_sig[64]);
 
-const char *s_status_str(int status);  // optional convenience
+// --- Chain config mutations ----------------------------------------------
+// Called by the NS REPL dispatcher when the operator issues
+// os.{cosmos,gno}.chain.{add,remove} / os.chain.wipe. Some mutations
+// (chain.add with destructive defaults, factory reset) escalate to a
+// Secure-drawn confirm prompt; see the s_*_with_consent helpers below.
+int  s_chains_add(uint8_t family, const char *label, const char *chain_id,
+                  const uint8_t dial_host[4], uint16_t port,
+                  const uint8_t *pinned_key /*32B or NULL*/);
+bool s_chains_remove(uint8_t family, const char *label);
+void s_chains_wipe(void);
+void s_hwm_wipe(void);
+
+// --- Trusted UI primitives -----------------------------------------------
+// Each one draws into the reserved trusted-prompt region of the
+// display, polls buttons Secure-side, and returns the result. NS
+// cannot influence what's shown.
+bool s_factory_reset_with_consent(void);
+
+// --- Display + input (low-trust veneers for the NS console) ---------------
+// NS provides up to N text lines to render in the console region.
+// Secure refuses to draw if a trusted prompt is currently active.
+void s_console_render_lines(const char * const *lines, size_t n);
+// True if the corresponding button is currently held. NS uses this
+// only for non-consent decisions (mode-select prompt at boot, factory
+// reset trigger detection). NEVER for confirming destructive actions.
+bool s_input_pressed(uint8_t btn);
+
+// --- Utility --------------------------------------------------------------
+int  s_random(uint8_t *out, size_t n);     // TRNG; used by NS for SC ephemerals
+const char *s_status_str(int status);
 ```
 
-`s_sign_and_advance` is the key change versus today's `os_crypto_sign`:
-it takes the slot index + (type, height, round) tuple and *atomically*
-advances the HWM before signing. Non-Secure code cannot bypass the
-double-sign check by skipping a `hwm_advance` call. Non-Secure can lie
-about (h, r, t) but only to push the HWM forward -- the seed never
-leaks, and the worst attacker outcome is bricking the validator (HWM
-permanently advanced past usable heights), which is much weaker than
-key extraction.
+The old `os_crypto_sign` becomes a thin NS-side wrapper around
+`s_sign_and_advance`. Existing app/driver code (`privval.c`,
+`sc_driver_*.c`) does not change shape — only the symbol it calls
+through. `hwm_advance` on the NS side disappears (callers always
+fuse with the sign op).
 
-`os_crypto_sign` and `hwm_advance` on the Non-Secure side become thin
-wrappers around `s_sign_and_advance`. The current call-site shape is
-preserved.
-
-#### M9.2 — Implementation plan (phased)
+#### M9.3 — Implementation phases
 
 `pico-sdk` 2.2.0 ships SAU + ACCESSCTRL register definitions and the
 Cortex-M33 CMSIS core header, but *no* middleware: no NSC veneer
-helpers, no S/NS linker script template, no example apps. The split is
-expected to be built from scratch on top of those primitives.
+helpers, no S/NS linker script template, no example apps. The split
+is built from scratch on top of those primitives.
 
-- **Phase 0 — Boundary hygiene (this milestone, partly done already).**
-  Confirm that no app/transport code reaches into the keystore or
-  Monocypher signing functions outside of `os_crypto_*`. (Currently:
-  only `bench.c` calls `crypto_ed25519_*` directly with a local seed --
-  fine, since the seed is a local fixture, not the real keystore.)
-  Document the secure-callable veneer signatures above as the M9
-  ABI.
+- **Phase 0 — Boundary hygiene.** Confirm that no app/transport code
+  reaches into the keystore or Monocypher signing functions outside of
+  `os_crypto_*`. (Done: only `bench.c` calls `crypto_ed25519_*`
+  directly with a local seed, which is fine.) Lock down the veneer
+  ABI above as the M9 contract.
 - **Phase 1 — Linker + memory layout.** Carve flash into S / NSC / NS
-  regions; carve SRAM the same way. Configure SAU on boot from the
-  Secure side, then `BLXNS` to the Non-Secure entry point.
-- **Phase 2 — Veneer entries.** Write `s_get_pubkey`,
-  `s_sign_and_advance`, `s_status_str` as `cmse_nonsecure_entry`
-  functions in the Secure image. Validate buffer pointers on entry
-  using ARM's `cmse_check_pointed_object` helpers.
-- **Phase 3 — Build system.** Split the CMake build into two static
-  libraries + two link steps + a final UF2 that packs both images.
-- **Phase 4 — ACCESSCTRL.** Configure ACCESSCTRL to:
-  - Allow Non-Secure access to USB / GPIO / SPI (for display) / lwIP-
-    relevant peripherals + the host CDC.
-  - Restrict TRNG access to Secure-only (default already; verify).
-  - Hardware SHA-256 stays accessible from both worlds (it's used by
-    the SC HKDF path on the NS side).
-- **Phase 5 — TinyUSB + lwIP audit.** Both assume a flat memory map.
-  Confirm their DMA descriptors and pbuf pools live entirely in NS
-  memory and don't try to reach into S regions; refactor if needed.
-- **Phase 6 — End-to-end revalidation.** Re-run `make test` (gno
-  handshake) and both testnet scripts. Add a negative test: NS code
-  attempting to read the seed region should fault.
+  regions; carve SRAM the same way. Boot lands in Secure; Secure
+  configures SAU + IDAU + ACCESSCTRL, then `BLXNS` to the NS entry
+  point.
+- **Phase 2 — Veneer entries.** Write the functions in §M9.2 as
+  `cmse_nonsecure_entry` symbols in the Secure image. Validate every
+  NS-supplied pointer on entry with `cmse_check_pointed_object`.
+  Refuse if any output buffer overlaps Secure memory.
+- **Phase 3 — Build system.** Split CMake into two link steps + a
+  final UF2 packaging step that places both images in flash at the
+  right offsets.
+- **Phase 4 — ACCESSCTRL + DMA attribution.** Per the boundary table:
+  flash, display SPI, button GPIO, TRNG, SHA peripheral all Secure;
+  USB + remaining peripherals NS. DMA channels attributed per-master
+  so an NS-initiated DMA cannot read Secure memory.
+- **Phase 5 — TinyUSB + lwIP audit.** Confirm DMA descriptors / pbuf
+  pools / network buffers live entirely in NS memory. Refactor any
+  shared-memory assumptions.
+- **Phase 6 — End-to-end revalidation.** `make test` + both testnet
+  scripts pass. Add a negative test: NS deliberately dereferencing the
+  seed VA hard-faults instead of returning bytes.
 
-#### M9.3 — Risks / open questions
+#### M9.4 — Risks / open questions
 
-- **bench.c.** Currently calls Monocypher directly. Will need to use
-  the NS copy of Monocypher (same library, different link unit), or be
-  removed -- it's a microbenchmark, not load-bearing.
-- **pico_sha256, pico_rand.** TRNG defaults to Secure-Privileged-only;
-  the NS-side SC handshake uses `pico_rand_get_bytes` for ephemerals
-  via the existing TRNG-backed PRNG. Either expose TRNG to NS via
-  ACCESSCTRL NSP bit, or have the NS side dual-source entropy from
-  Secure via a small veneer (`s_random(out, n)`).
-- **Memory cost.** Two copies of Monocypher's X25519 + SHA + AEAD (one
-  per world). Code size impact ~5-10 KB doubled = acceptable on 4 MB
-  flash.
-- **Build complexity.** Two ELFs, dual link, UF2 packaging. Manual
-  scaffold required; no SDK helper.
-- **First-time bringup risk.** SAU misconfiguration on boot is a hard-
-  fault-on-every-instruction class problem. Plan to keep an "escape
-  hatch" build flag during development that disables the split.
+- **`bench.c`** uses Monocypher's Ed25519 directly with a local test
+  seed; it ends up in NS using the NS copy of Monocypher. No change
+  needed (it never touched the real keystore).
+- **TRNG access from NS.** SC handshake needs ephemerals. Options:
+  (a) `s_random` veneer — every random byte is a cross-world call;
+  acceptable since handshakes are infrequent;
+  (b) Secure seeds an NS-side PRNG at boot, NS uses it for bulk
+  randomness — faster but expands NS trust slightly.
+  Default to (a).
+- **Memory cost.** ~5-10 KB of duplicated Monocypher in NS; trivial.
+- **Build complexity.** Two ELFs, dual link, UF2 packaging. Manual.
+- **First-time bringup risk.** SAU misconfiguration = brick.
+  Development build should preserve an "escape hatch" that disables
+  the split.
+- **Mode select at boot.** Currently NS-driven. After M9 it moves to
+  Secure (Secure decides whether to launch the admin REPL path or the
+  PrivVal path before transferring control), since the choice gates
+  trust.
+- **Console rendering veneer cost.** Each `s_console_render_lines`
+  call is a context switch. Rendering is already lazy (≥10 s gap in
+  PrivVal mode), so the overhead is irrelevant in practice. The
+  console is also size-limited; the veneer caps lines × line length.
+
+### ◯ M9.5 — At-rest encryption + PIN unlock
+
+Builds on the M9 boundary: with the seed now in Secure memory, the
+remaining attack surface is **physical**. Today's `TEST_SEED` is
+plaintext in firmware; anyone with the flash dump tools (~$50 of gear)
+can extract it. M9.5 encrypts the seed at rest and gates decryption
+on a PIN entered through M9's trusted-prompt UI.
+
+Sketch:
+- Seed-encryption key (SEK) = HKDF(`pico_unique_board_id || PIN || salt`)
+- At boot, Secure prompts for PIN via the trusted UI, derives SEK,
+  decrypts the seed blob from flash, holds the seed in Secure SRAM.
+- Power off → seed gone from SRAM → device requires PIN again next
+  boot.
+- Wrong-PIN counter in Secure-write flash; N consecutive failures
+  triggers a destructive wipe (HWM + chain config + encrypted seed
+  blob all erased).
+- PIN entry UI: two-button digit dial (LEFT scrolls, RIGHT confirms
+  digit; both confirms PIN). 4-6 digits.
+
+Logical successor to M9, deliberately separated because the PIN UX
++ retry policy + provisioning ("how does the operator set the PIN
+the first time?") is its own design exercise on top of the M9
+trusted-prompt foundation.
 
 ### ◯ M10 — Signed firmware + OTP fuse
 
