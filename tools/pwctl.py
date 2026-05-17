@@ -1,25 +1,18 @@
 #!/usr/bin/env python3
 """
-PicoWallet test harness for the device's Tendermint privval listener.
+PicoWallet test harness for the device's gno.land privval listener.
 
 Usage:
-  pwctl.py pubkey                        Get & print validator pubkey.
-  pwctl.py sign-vote [--height H] ...    Craft a SignVoteRequest, send,
-                                         verify the returned signature.
-  pwctl.py replay [--height H]           Send the same SignVoteRequest twice;
-                                         first should succeed, second should
-                                         get back double_sign_refused.
-  pwctl.py gno-sc-handshake              Run the gno.land SecretConnection
-                                         handshake against the device; verify
-                                         the device's signature and emit ours.
-  pwctl.py cosmos-sc-handshake           Same idea for the cometbft
-                                         (Merlin-variant) handshake.
+  pwctl.py gno-sc-handshake       Run the gno.land SecretConnection handshake
+                                  against a device-configured gno chain slot.
+                                  Drives the full PubKey + SignRequest +
+                                  cross-chain HWM + replay-rejection sequence.
 
-Defaults: host 192.168.7.1, cosmos port 26660 (SecretConnection, Merlin).
-gno-sc-handshake uses --sc-port 26659. Every cosmos privval command now
-runs over the encrypted channel -- the plaintext path on 26658 was a
-dev-only affordance and has been removed (no real cometbft listener
-accepts plaintext TCP).
+The device must be in PrivVal mode (RIGHT button at boot) with at least one
+gno chain slot configured via `os.gno.chain.add` in TMKMS mode; pwctl
+connects to that slot's listen port. Cosmos paths are exercised end-to-end
+via `scripts/testnet.sh` instead (the device dials cometbft, not the other
+way around, so there is no listener for pwctl to dial into).
 
 Requires `cryptography` (pip install cryptography) for IETF ChaCha20-Poly1305.
 """
@@ -28,29 +21,22 @@ import argparse
 import socket
 import struct
 import sys
-import time
 from typing import Tuple
 
 from nacl.signing import VerifyKey
 from nacl.exceptions import BadSignatureError
 
-# Optional: needed only by `gno-sc-handshake`. The IETF (12-byte nonce)
-# ChaCha20-Poly1305 isn't exposed by pynacl, so we use `cryptography` here.
+# IETF (12-byte nonce) ChaCha20-Poly1305 isn't exposed by pynacl, so we use
+# `cryptography` for the SecretConnection AEAD.
 try:
     from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 except ImportError:  # pragma: no cover
     ChaCha20Poly1305 = None
 
-# Merlin transcripts for the cometbft variant of SecretConnection.
-# Pure-Python so we don't depend on a Rust extension. Mirrors the C side.
-try:
-    from merlin import Transcript as _MerlinTranscript
-except ImportError:  # pragma: no cover
-    _MerlinTranscript = None
-
 
 # -----------------------------------------------------------------------------
-# Minimal protobuf wire-format helpers.
+# Minimal protobuf wire-format helpers (shared between the SC handshake
+# framing and the gno amino-on-the-wire encoders below).
 # -----------------------------------------------------------------------------
 
 def write_varint(val: int) -> bytes:
@@ -115,442 +101,6 @@ def find_field_bytes(buf: bytes, target_field: int) -> bytes:
         else:
             raise ValueError(f"unsupported wire type {wire}")
     raise KeyError(f"field {target_field} not found")
-
-
-# -----------------------------------------------------------------------------
-# Message encoders / decoders.
-# -----------------------------------------------------------------------------
-
-def encode_block_id(block_hash: bytes, parts_total: int, parts_hash: bytes) -> bytes:
-    pth = (
-        write_varint_field(1, parts_total)
-        + write_bytes_field(2, parts_hash)
-    )
-    return write_bytes_field(1, block_hash) + write_bytes_field(2, pth)
-
-
-def encode_timestamp(seconds: int, nanos: int) -> bytes:
-    return write_varint_field(1, seconds) + write_varint_field(2, nanos)
-
-
-def encode_vote_request_body(type_, height, round_, block_id, ts_seconds, ts_nanos,
-                             chain_id) -> Tuple[bytes, bytes]:
-    """Returns (sign_vote_request_body, canonical_vote_bytes)."""
-    ts = encode_timestamp(ts_seconds, ts_nanos)
-
-    # Vote (in the wire/request shape: varint height/round)
-    vote = (
-        write_varint_field(1, type_)
-        + write_varint_field(2, height)
-        + write_varint_field(3, round_)
-        + write_bytes_field(4, block_id)
-        + write_bytes_field(5, ts)
-    )
-
-    # CanonicalVote (sfixed64 height/round, plus chain_id at field 6)
-    canon = (
-        write_varint_field(1, type_)
-        + write_sfixed64_field(2, height)
-        + write_sfixed64_field(3, round_)
-        + write_bytes_field(4, block_id)
-        + write_bytes_field(5, ts)
-        + write_bytes_field(6, chain_id.encode())
-    )
-
-    body = (
-        write_bytes_field(1, vote)
-        + write_bytes_field(2, chain_id.encode())
-    )
-    return body, canon
-
-
-def parse_pubkey_response(msg_body: bytes) -> bytes:
-    """msg_body is the inner PubKeyResponse. Returns the ed25519 pubkey."""
-    pk = find_field_bytes(msg_body, 1)  # pub_key
-    ed = find_field_bytes(pk, 1)  # ed25519
-    return ed
-
-
-def _parse_signed_response(msg_body: bytes, inner_field: int, sig_field: int) -> bytes:
-    """Generic SignedXxxResponse parser. `inner_field` is the field of the
-    Vote/Proposal inside the response. `sig_field` is the signature field
-    number inside that inner message (8 for Vote, 7 for Proposal)."""
-    try:
-        err = find_field_bytes(msg_body, 2)
-    except KeyError:
-        pass
-    else:
-        try:
-            desc = find_field_bytes(err, 2).decode("ascii", "replace")
-        except KeyError:
-            desc = "(no desc)"
-        raise RuntimeError(f"device returned error: desc={desc!r}")
-
-    inner = find_field_bytes(msg_body, inner_field)
-    pos = 0
-    last_sig = None
-    while pos < len(inner):
-        field, wire, pos = parse_tag(inner, pos)
-        if wire == 2:
-            ln, pos = read_varint(inner, pos)
-            if field == sig_field:
-                last_sig = inner[pos:pos + ln]
-            pos += ln
-        elif wire == 0:
-            _, pos = read_varint(inner, pos)
-        elif wire == 1:
-            pos += 8
-        elif wire == 5:
-            pos += 4
-    if last_sig is None:
-        raise RuntimeError("response inner message contained no signature")
-    return last_sig
-
-
-def parse_signed_vote_response(msg_body: bytes) -> bytes:
-    return _parse_signed_response(msg_body, inner_field=1, sig_field=8)
-
-
-def parse_signed_proposal_response(msg_body: bytes) -> bytes:
-    return _parse_signed_response(msg_body, inner_field=1, sig_field=7)
-
-
-# -----------------------------------------------------------------------------
-# Wire transport. Every privval round-trip goes through the cometbft
-# SecretConnection (port 26660): we open the socket, run the Merlin-variant
-# handshake, then seal each request frame and unseal each response frame.
-# The plaintext path on 26658 is gone now -- cometbft itself wouldn't accept
-# it anyway, so there's no validator on the other end that could use it.
-# -----------------------------------------------------------------------------
-
-class CosmosSCSession:
-    """One open, authenticated cosmos SecretConnection.
-
-    `connect()` runs the full handshake (X25519 ephemeral -> Merlin challenge
-    -> Ed25519 mutual auth -> HKDF AEAD keys). `send_recv()` does one privval
-    round-trip: one sealed frame out, one sealed frame in. Sequence counters
-    are tracked per side.
-
-    Used as a context manager. The handshake takes ~50 ms and dominates a
-    single-shot pubkey/sign-vote; bench amortizes it across many requests.
-    """
-
-    def __init__(self, sock, send_key, recv_key, dev_pub):
-        self.sock     = sock
-        self.send_key = send_key
-        self.recv_key = recv_key
-        self.send_seq = 0
-        self.recv_seq = 0
-        self.dev_pub  = dev_pub
-
-    @classmethod
-    def connect(cls, host, port, signing_seed=None):
-        from nacl.bindings import crypto_scalarmult, crypto_scalarmult_base
-        from nacl.signing import SigningKey
-        import os as _os
-
-        if _MerlinTranscript is None:
-            raise SystemExit("merlin.py not importable; run from repo root")
-
-        # Ephemeral X25519 + long-term Ed25519.
-        loc_eph_priv = _os.urandom(32)
-        loc_eph_pub  = crypto_scalarmult_base(loc_eph_priv)
-        if signing_seed:
-            seed = bytes.fromhex(signing_seed)
-            if len(seed) != 32:
-                raise SystemExit("--signing-seed must be 32 hex bytes")
-            loc_sk = SigningKey(seed)
-        else:
-            loc_sk = SigningKey.generate()
-        loc_pk = bytes(loc_sk.verify_key)
-
-        sock = socket.create_connection((host, port), timeout=10.0)
-
-        # Ephemeral exchange. Host writes first (device defers to on_recv).
-        sock.sendall(_encode_eph_msg(loc_eph_pub))
-        dev_eph = _parse_eph_msg(_recv_exact(sock, GNO_SC_EPH_MSG_SIZE))
-        if dev_eph in GNO_SC_SMALL_ORDER:
-            sock.close()
-            raise RuntimeError("device sent a small-order point")
-
-        # AEAD keys via HKDF (same path as gno).
-        dh_secret    = crypto_scalarmult(loc_eph_priv, dev_eph)
-        loc_is_least = loc_eph_pub < dev_eph
-        lo, hi = (loc_eph_pub, dev_eph) if loc_is_least else (dev_eph, loc_eph_pub)
-        derived = _hkdf_sha256(dh_secret, salt=b"", info=GNO_SC_INFO, length=96)
-        if loc_is_least:
-            recv_key, send_key = derived[0:32], derived[32:64]
-        else:
-            send_key, recv_key = derived[0:32], derived[32:64]
-
-        # Challenge via Merlin (the cometbft-specific part).
-        tr = _MerlinTranscript(_TM_TRANSCRIPT_LABEL)
-        tr.append(_TM_LABEL_LOW,  lo)
-        tr.append(_TM_LABEL_HIGH, hi)
-        tr.append(_TM_LABEL_DH,   dh_secret)
-        challenge = tr.challenge(_TM_LABEL_MAC, 32)
-
-        # Verify device's auth-sig.
-        dev_plain = _open_frame(recv_key, 0, _recv_exact(sock, GNO_SC_SEALED_FRAME_SIZE))
-        dev_pub, dev_sig = _cosmos_parse_auth(dev_plain)
-        try:
-            VerifyKey(dev_pub).verify(challenge, dev_sig)
-        except BadSignatureError:
-            sock.close()
-            raise RuntimeError("device's SC auth-sig did not verify")
-
-        # Send our auth-sig.
-        loc_sig   = loc_sk.sign(challenge).signature
-        loc_plain = _cosmos_build_auth(loc_pk, loc_sig)
-        sock.sendall(_seal_frame(send_key, 0, loc_plain))
-
-        # send_seq / recv_seq now both at 1 (one frame used for auth on each side).
-        s = cls(sock, send_key, recv_key, dev_pub)
-        s.send_seq = 1
-        s.recv_seq = 1
-        return s
-
-    def send_recv(self, framed_req: bytes) -> bytes:
-        """Send one privval-framed request (uvarint length + outer Message
-        body). Returns the inner Message body of the response, like
-        the old plaintext helpers did."""
-        self.sock.sendall(_seal_frame(self.send_key, self.send_seq, framed_req))
-        self.send_seq += 1
-        sealed = _recv_exact(self.sock, GNO_SC_SEALED_FRAME_SIZE)
-        plain  = _open_frame(self.recv_key, self.recv_seq, sealed)
-        self.recv_seq += 1
-        # Strip outer uvarint length.
-        outer_len, pos = read_varint(plain, 0)
-        body = plain[pos:pos + outer_len]
-        # Unwrap the single length-delimited field inside.
-        _, _, pos2     = parse_tag(body, 0)
-        inner_len, pos2 = read_varint(body, pos2)
-        return body[pos2:pos2 + inner_len]
-
-    def close(self):
-        try: self.sock.close()
-        except Exception: pass
-
-    def __enter__(self): return self
-    def __exit__(self, *a): self.close()
-
-
-def send_recv(host: str, port: int, outer_field: int, request_body: bytes,
-              signing_seed: str = None) -> bytes:
-    """Single-shot privval round-trip over a fresh cosmos SC session.
-    `signing_seed` (32 hex bytes) pins the host's Ed25519 identity so the
-    device's allowlist can authorize us; without it a random identity is
-    used per run, which the device will reject if it has any pinned peers."""
-    payload = write_bytes_field(outer_field, request_body)
-    frame   = write_varint(len(payload)) + payload
-    with CosmosSCSession.connect(host, port, signing_seed=signing_seed) as sc:
-        return sc.send_recv(frame)
-
-
-# -----------------------------------------------------------------------------
-# Commands.
-# -----------------------------------------------------------------------------
-
-def cmd_pubkey(args):
-    inner = send_recv(args.host, args.port, outer_field=1, request_body=b"",
-                      signing_seed=args.signing_seed)
-    pk = parse_pubkey_response(inner)
-    print(f"ed25519 pubkey ({len(pk)} bytes): {pk.hex()}")
-    return pk
-
-
-def cmd_sign_vote(args):
-    block_hash = bytes.fromhex(args.block_hash) if args.block_hash else b"\x11" * 32
-    parts_hash = bytes.fromhex(args.parts_hash) if args.parts_hash else b"\x22" * 32
-    block_id   = encode_block_id(block_hash, args.parts_total, parts_hash)
-
-    body, canon = encode_vote_request_body(
-        type_       = args.type,
-        height      = args.height,
-        round_      = args.round,
-        block_id    = block_id,
-        ts_seconds  = args.timestamp,
-        ts_nanos    = 0,
-        chain_id    = args.chain_id,
-    )
-
-    # 1. Get pubkey first.
-    pk = cmd_pubkey(args)
-
-    # 2. Send the sign request.
-    inner = send_recv(args.host, args.port, outer_field=3, request_body=body,
-                      signing_seed=args.signing_seed)
-    sig = parse_signed_vote_response(inner)
-    print(f"signature ({len(sig)} bytes): {sig.hex()}")
-
-    # 3. Reconstruct sign-input (uvarint-length || canonical bytes) and verify.
-    sign_input = write_varint(len(canon)) + canon
-    try:
-        VerifyKey(pk).verify(sign_input, sig)
-        print("signature VERIFIED against device pubkey")
-    except BadSignatureError:
-        print("signature did NOT verify -- canonical bytes mismatch?")
-        sys.exit(1)
-    return sig
-
-
-def cmd_sign_proposal(args):
-    """Send a SignProposalRequest, verify the returned signature."""
-    block_hash = bytes.fromhex(args.block_hash) if args.block_hash else b"\x11" * 32
-    parts_hash = bytes.fromhex(args.parts_hash) if args.parts_hash else b"\x22" * 32
-    block_id   = encode_block_id(block_hash, args.parts_total, parts_hash)
-
-    ts = encode_timestamp(args.timestamp, 0)
-
-    # Proposal field order: type, height, round, pol_round, block_id, timestamp.
-    proposal = (
-        write_varint_field(1, args.type)         # 32 = Proposal
-        + write_varint_field(2, args.height)
-        + write_varint_field(3, args.round)
-        + write_varint_field(4, args.pol_round)
-        + write_bytes_field (5, block_id)
-        + write_bytes_field (6, ts)
-    )
-
-    # CanonicalProposal: sfixed64 for height/round/pol_round, chain_id at f=7.
-    canon = (
-        write_varint_field(1, args.type)
-        + write_sfixed64_field(2, args.height)
-        + write_sfixed64_field(3, args.round)
-        + write_sfixed64_field(4, args.pol_round)
-        + write_bytes_field   (5, block_id)
-        + write_bytes_field   (6, ts)
-        + write_bytes_field   (7, args.chain_id.encode())
-    )
-
-    body = (
-        write_bytes_field(1, proposal)
-        + write_bytes_field(2, args.chain_id.encode())
-    )
-
-    pk = cmd_pubkey(args)
-    inner = send_recv(args.host, args.port, outer_field=5, request_body=body,
-                      signing_seed=args.signing_seed)
-    sig = parse_signed_proposal_response(inner)
-    print(f"signature ({len(sig)} bytes): {sig.hex()}")
-
-    sign_input = write_varint(len(canon)) + canon
-    try:
-        VerifyKey(pk).verify(sign_input, sig)
-        print("signature VERIFIED against device pubkey")
-    except BadSignatureError:
-        print("signature did NOT verify")
-        sys.exit(1)
-
-
-def _recv_framed(sock: socket.socket) -> bytes:
-    """Read one privval frame (uvarint length + body) off `sock` and return
-    the inner Message body (after unwrapping the outer length-delimited
-    field)."""
-    head = b""
-    while True:
-        b = sock.recv(1)
-        if not b:
-            raise RuntimeError("connection closed before length")
-        head += b
-        if b[0] < 0x80:
-            break
-    ln, _ = read_varint(head, 0)
-    body = b""
-    while len(body) < ln:
-        chunk = sock.recv(ln - len(body))
-        if not chunk:
-            raise RuntimeError("connection closed mid-body")
-        body += chunk
-    _, _, pos = parse_tag(body, 0)
-    inner_len, pos = read_varint(body, pos)
-    return body[pos:pos + inner_len]
-
-
-def cmd_bench(args):
-    """Open one long-lived TCP connection and stream `args.count` SignVote
-    requests with incrementing heights. Report latency percentiles +
-    throughput. Verifies each signature against the device pubkey."""
-
-    # Fetch pubkey once (separate connection).
-    print("fetching pubkey...")
-    pk = cmd_pubkey(args)
-
-    block_hash = b"\x11" * 32
-    parts_hash = b"\x22" * 32
-    block_id   = encode_block_id(block_hash, 1, parts_hash)
-
-    print(f"\nrunning {args.count} sign-votes "
-          f"(heights {args.start_height}..{args.start_height + args.count - 1})...")
-
-    timings = []
-    t_start = time.perf_counter()
-
-    with CosmosSCSession.connect(args.host, args.port,
-                                 signing_seed=args.signing_seed) as sc:
-        for i in range(args.count):
-            h = args.start_height + i
-            body, canon = encode_vote_request_body(
-                type_=1, height=h, round_=0,
-                block_id=block_id,
-                ts_seconds=1715731200 + i, ts_nanos=0,
-                chain_id=args.chain_id,
-            )
-            payload = write_bytes_field(3, body)
-            frame = write_varint(len(payload)) + payload
-
-            t0 = time.perf_counter()
-            inner = sc.send_recv(frame)
-            t1 = time.perf_counter()
-
-            sig = parse_signed_vote_response(inner)
-            sign_input = write_varint(len(canon)) + canon
-            try:
-                VerifyKey(pk).verify(sign_input, sig)
-            except BadSignatureError:
-                print(f"sig FAILED at height {h}")
-                sys.exit(1)
-
-            timings.append(t1 - t0)
-            if (i + 1) % 100 == 0:
-                last100 = timings[-100:]
-                print(f"  {i+1:5d}/{args.count}: "
-                      f"last 100 avg {sum(last100)/len(last100)*1000:.1f} ms")
-
-    t_total = time.perf_counter() - t_start
-
-    timings.sort()
-    n = len(timings)
-
-    def pct(p):
-        idx = max(0, min(n - 1, int(p / 100.0 * n)))
-        return timings[idx]
-
-    print()
-    print(f"=== bench: {n} sign-votes over one cosmos SC session ===")
-    print(f"wall time:   {t_total:.2f} s")
-    print(f"throughput:  {n / t_total:.1f} signs/sec")
-    print(f"per-sign latency (ms):")
-    print(f"  min  {timings[0]*1000:7.2f}")
-    print(f"  p50  {pct(50)*1000:7.2f}")
-    print(f"  p90  {pct(90)*1000:7.2f}")
-    print(f"  p95  {pct(95)*1000:7.2f}")
-    print(f"  p99  {pct(99)*1000:7.2f}")
-    print(f"  max  {timings[-1]*1000:7.2f}")
-    print(f"  mean {sum(timings)/n*1000:7.2f}")
-
-
-def cmd_replay(args):
-    print("--- first signing ---")
-    cmd_sign_vote(args)
-    print("\n--- same (h,r,t) again, expecting refusal ---")
-    try:
-        cmd_sign_vote(args)
-    except RuntimeError as e:
-        print(f"got expected error: {e}")
-        return
-    print("ERROR: device signed twice at the same (h,r,t)")
-    sys.exit(1)
 
 
 # ============================================================================
@@ -789,8 +339,8 @@ def cmd_gno_sc_handshake(args):
     loc_eph_pub  = crypto_scalarmult_base(loc_eph_priv)
 
     # 2. Generate our long-term Ed25519 keypair. Use --signing-seed for a
-    # deterministic peer identity (so the device's auth_keys allowlist can
-    # actually be configured to recognize us across runs).
+    # deterministic peer identity so the gno chain slot's pinned_key (set
+    # via os.gno.chain.add ... <pubkey_hex>) can recognize us across runs.
     if args.signing_seed:
         seed = bytes.fromhex(args.signing_seed)
         if len(seed) != 32:
@@ -917,222 +467,18 @@ def cmd_gno_sc_handshake(args):
         sock.close()
 
 
-# ============================================================================
-# Cometbft SecretConnection (Merlin variant).
-# Same X25519 + HKDF AEAD path as gno; challenge derivation uses Merlin.
-# Handshake wire: protobuf-delimited. AuthSigMessage wraps pubkey in
-# PublicKey oneof.
-# ============================================================================
-
-_TM_TRANSCRIPT_LABEL = b"TENDERMINT_SECRET_CONNECTION_TRANSCRIPT_HASH"
-_TM_LABEL_LOW   = b"EPHEMERAL_LOWER_PUBLIC_KEY"
-_TM_LABEL_HIGH  = b"EPHEMERAL_UPPER_PUBLIC_KEY"
-_TM_LABEL_DH    = b"DH_SECRET"
-_TM_LABEL_MAC   = b"SECRET_CONNECTION_MAC"
-
-# Ephemeral message is byte-identical to gno's; reuse _encode_eph_msg /
-# _parse_eph_msg for that.
-
-def _cosmos_build_auth(pub: bytes, sig: bytes) -> bytes:
-    """AuthSigMessage{PubKey: PublicKey{Ed25519: pub}, Sig: sig} — 103 bytes."""
-    assert len(pub) == 32 and len(sig) == 64
-    return (
-        bytes([102])                 # uvarint outer = 102
-        + bytes([0x0a, 34])          # field 1 (PubKey), len=34
-        + bytes([0x0a, 32]) + pub    # PublicKey.ed25519 oneof
-        + bytes([0x12, 64]) + sig    # field 2 (sig)
-    )
-
-def _cosmos_parse_auth(plain: bytes) -> Tuple[bytes, bytes]:
-    if (len(plain) != 103
-        or plain[0]  != 102 or plain[1]  != 0x0a or plain[2]  != 34
-        or plain[3]  != 0x0a or plain[4]  != 32
-        or plain[37] != 0x12 or plain[38] != 64):
-        raise ValueError(f"bad AuthSigMessage framing: {plain.hex()}")
-    return plain[5:37], plain[39:103]
-
-
-def cmd_cosmos_sc_handshake(args):
-    from nacl.bindings import crypto_scalarmult, crypto_scalarmult_base
-    from nacl.signing import SigningKey
-    import os as _os
-
-    if _MerlinTranscript is None:
-        raise SystemExit("merlin.py not importable; run from repo root or "
-                         "ensure tools/ is on PYTHONPATH")
-
-    # Ephemeral X25519 (always random).
-    loc_eph_priv = _os.urandom(32)
-    loc_eph_pub  = crypto_scalarmult_base(loc_eph_priv)
-
-    # Long-term Ed25519 (deterministic if --signing-seed).
-    if args.signing_seed:
-        seed = bytes.fromhex(args.signing_seed)
-        if len(seed) != 32:
-            raise SystemExit("--signing-seed must be 32 hex bytes (64 chars)")
-        loc_sk = SigningKey(seed)
-    else:
-        loc_sk = SigningKey.generate()
-    loc_pk = bytes(loc_sk.verify_key)
-    print(f"host pubkey     : {loc_pk.hex()}")
-
-    sock = socket.create_connection((args.host, args.sc_port), timeout=5.0)
-    try:
-        # Ephemeral exchange (host sends first; device defers writes from accept).
-        sock.sendall(_encode_eph_msg(loc_eph_pub))
-        dev_eph_msg = _recv_exact(sock, GNO_SC_EPH_MSG_SIZE)  # same shape as gno
-        rem_eph_pub = _parse_eph_msg(dev_eph_msg)
-        if rem_eph_pub in GNO_SC_SMALL_ORDER:
-            raise RuntimeError("device sent a small-order point")
-
-        # AEAD keys: same HKDF path as gno (info string identical).
-        dh_secret    = crypto_scalarmult(loc_eph_priv, rem_eph_pub)
-        loc_is_least = loc_eph_pub < rem_eph_pub
-        if loc_is_least:
-            lo, hi = loc_eph_pub, rem_eph_pub
-        else:
-            lo, hi = rem_eph_pub, loc_eph_pub
-        derived = _hkdf_sha256(dh_secret, salt=b"", info=GNO_SC_INFO, length=96)
-        if loc_is_least:
-            recv_key, send_key = derived[0:32], derived[32:64]
-        else:
-            send_key, recv_key = derived[0:32], derived[32:64]
-
-        # Challenge: Merlin transcript over (lo, hi, dh_secret).
-        tr = _MerlinTranscript(_TM_TRANSCRIPT_LABEL)
-        tr.append(_TM_LABEL_LOW,  lo)
-        tr.append(_TM_LABEL_HIGH, hi)
-        tr.append(_TM_LABEL_DH,   dh_secret)
-        challenge = tr.challenge(_TM_LABEL_MAC, 32)
-
-        # Recv device's sealed auth-sig, verify.
-        dev_sealed = _recv_exact(sock, GNO_SC_SEALED_FRAME_SIZE)
-        dev_plain  = _open_frame(recv_key, 0, dev_sealed)
-        if len(dev_plain) != 103:
-            raise RuntimeError(f"unexpected auth-sig length {len(dev_plain)}")
-        dev_pub, dev_sig = _cosmos_parse_auth(dev_plain)
-        try:
-            VerifyKey(dev_pub).verify(challenge, dev_sig)
-        except BadSignatureError:
-            raise RuntimeError("device's sig over Merlin-challenge did not verify")
-
-        # Sign our challenge and send our auth-sig.
-        loc_sig = loc_sk.sign(challenge).signature
-        loc_plain = _cosmos_build_auth(loc_pk, loc_sig)
-        sock.sendall(_seal_frame(send_key, 0, loc_plain))
-
-        print(f"handshake ok")
-        print(f"  device pubkey : {dev_pub.hex()}")
-        print(f"  loc_is_least  : {loc_is_least}")
-        print(f"  challenge     : {challenge.hex()}")
-
-        # After the handshake, exercise the cosmos protobuf privval through
-        # the SC channel as end-to-end proof. seqs sit at 1 (one frame each
-        # was consumed by the auth-sig exchange).
-        send_seq = 1
-        recv_seq = 1
-
-        def _privval_roundtrip(outer_field: int, body: bytes) -> bytes:
-            """Send one framed privval request through the SC; return the
-            inner Message body of the response (after stripping uvarint
-            length + outer tag/length, same shape as plaintext send_recv)."""
-            nonlocal send_seq, recv_seq
-            payload  = write_bytes_field(outer_field, body)
-            framed   = write_varint(len(payload)) + payload
-            sock.sendall(_seal_frame(send_key, send_seq, framed)); send_seq += 1
-            resp_sealed = _recv_exact(sock, GNO_SC_SEALED_FRAME_SIZE)
-            resp_plain  = _open_frame(recv_key, recv_seq, resp_sealed); recv_seq += 1
-            # resp_plain is one privval framed message: uvarint(len) || outer.
-            # Strip the uvarint header.
-            ln, p = read_varint(resp_plain, 0)
-            outer = resp_plain[p:p+ln]
-            _, _, q = parse_tag(outer, 0)
-            inner_len, q = read_varint(outer, q)
-            return outer[q:q+inner_len]
-
-        # PubKeyRequest -> PubKeyResponse. Verifies that:
-        #   - the SC channel carries privval bytes both directions
-        #   - the device's privval handler is dispatching on the encrypted side
-        #   - the response decrypts cleanly and parses
-        inner = _privval_roundtrip(outer_field=1, body=b"")
-        privval_pub = parse_pubkey_response(inner)
-        if privval_pub != dev_pub:
-            raise RuntimeError(
-                f"privval pubkey {privval_pub.hex()} != "
-                f"SC-authenticated pubkey {dev_pub.hex()}")
-        print(f"  privval pubkey: {privval_pub.hex()} (matches SC auth)")
-    finally:
-        sock.close()
-
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="192.168.7.1")
-    # All cosmos privval traffic now runs over the SecretConnection on 26660;
-    # plaintext 26658 is gone. gno commands still use --sc-port (26659).
-    ap.add_argument("--port", type=int, default=26660,
-                    help="cosmos SecretConnection listener port (default 26660)")
-    ap.add_argument("--signing-seed", default=None,
-                    help="32-byte hex seed for the host's long-term Ed25519 key "
-                         "used during the SC handshake. Required when the device "
-                         "has a pinned peer allowlist; otherwise a random identity "
-                         "is used.")
+    ap.add_argument("--host", default="192.168.7.1",
+                    help="device IP address (default 192.168.7.1)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-
-    sub.add_parser("pubkey").set_defaults(func=cmd_pubkey)
-
-    sv = sub.add_parser("sign-vote")
-    sv.add_argument("--type",       type=int, default=1)   # 1=Prevote
-    sv.add_argument("--height",     type=int, default=100)
-    sv.add_argument("--round",      type=int, default=0)
-    sv.add_argument("--chain-id",   default="test-chain")
-    sv.add_argument("--block-hash", default=None,
-                    help="hex; default 32 bytes of 0x11")
-    sv.add_argument("--parts-total",type=int, default=1)
-    sv.add_argument("--parts-hash", default=None,
-                    help="hex; default 32 bytes of 0x22")
-    sv.add_argument("--timestamp",  type=int, default=1715731200)
-    sv.set_defaults(func=cmd_sign_vote)
-
-    rp = sub.add_parser("replay")
-    for a in ("--type", "--height", "--round", "--chain-id",
-              "--block-hash", "--parts-total", "--parts-hash", "--timestamp"):
-        # mirror sign-vote args
-        pass
-    rp.add_argument("--type",       type=int, default=1)
-    rp.add_argument("--height",     type=int, default=100)
-    rp.add_argument("--round",      type=int, default=0)
-    rp.add_argument("--chain-id",   default="test-chain")
-    rp.add_argument("--block-hash", default=None)
-    rp.add_argument("--parts-total",type=int, default=1)
-    rp.add_argument("--parts-hash", default=None)
-    rp.add_argument("--timestamp",  type=int, default=1715731200)
-    rp.set_defaults(func=cmd_replay)
-
-    sp = sub.add_parser("sign-proposal")
-    sp.add_argument("--type",       type=int, default=32)   # 32 = Proposal
-    sp.add_argument("--height",     type=int, default=200)
-    sp.add_argument("--round",      type=int, default=0)
-    sp.add_argument("--pol-round",  type=int, default=-1)
-    sp.add_argument("--chain-id",   default="test-chain")
-    sp.add_argument("--block-hash", default=None)
-    sp.add_argument("--parts-total",type=int, default=1)
-    sp.add_argument("--parts-hash", default=None)
-    sp.add_argument("--timestamp",  type=int, default=1715731200)
-    sp.set_defaults(func=cmd_sign_proposal)
-
-    bn = sub.add_parser("bench",
-                        help="benchmark N sign-votes over one connection")
-    bn.add_argument("--count",        type=int, default=1000)
-    bn.add_argument("--start-height", type=int, default=10000)
-    bn.add_argument("--chain-id",     default="test-chain")
-    bn.set_defaults(func=cmd_bench)
 
     gh = sub.add_parser("gno-sc-handshake",
                         help="run the gno.land SecretConnection handshake "
                              "against the device and verify both sides")
     gh.add_argument("--sc-port", type=int, default=26659,
-                    help="device's gno SecretConnection listener port")
+                    help="device's gno SecretConnection listener port "
+                         "(matches a gno chain slot's port)")
     gh.add_argument("--sign-height", type=int, default=1_000_000,
                     help="height for the test SignRequest; must exceed the "
                          "device's current HWM for the primary --chain-id.")
@@ -1142,19 +488,9 @@ def main():
                     help="alternate chain_id used to verify per-chain HWM isolation")
     gh.add_argument("--signing-seed", default=None,
                     help="32-byte hex seed for the host's long-term Ed25519 key. "
-                         "Use a fixed seed if the device has a pinned allowlist "
-                         "(see os.auth_add). Default: random per run.")
+                         "Use a fixed seed if the gno chain slot has a pinned "
+                         "peer key (see os.gno.chain.add). Default: random per run.")
     gh.set_defaults(func=cmd_gno_sc_handshake)
-
-    ch = sub.add_parser("cosmos-sc-handshake",
-                        help="run the cometbft SecretConnection (Merlin variant) "
-                             "handshake against the device")
-    ch.add_argument("--sc-port", type=int, default=26660,
-                    help="device's cometbft SecretConnection listener port")
-    ch.add_argument("--signing-seed", default=None,
-                    help="32-byte hex seed for the host's long-term Ed25519 key. "
-                         "Default: random per run.")
-    ch.set_defaults(func=cmd_cosmos_sc_handshake)
 
     args = ap.parse_args()
     args.func(args)

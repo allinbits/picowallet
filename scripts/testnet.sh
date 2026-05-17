@@ -31,7 +31,6 @@ TESTNET_DIR="${TESTNET_DIR:-$HOME/.picowallet-testnet}"
 
 PICOWALLET_HOST="${PICOWALLET_HOST:-192.168.7.1}"
 PICOWALLET_SC_PORT="${PICOWALLET_SC_PORT:-26660}"
-PICOWALLET_SIGNING_SEED="${PICOWALLET_SIGNING_SEED:-0101010101010101010101010101010101010101010101010101010101010101}"
 
 COSMOS_SDK_PATH="${COSMOS_SDK_PATH:-/Volumes/Tendermint/cosmos-sdk}"
 SIMD_BIN="${SIMD_BIN:-$COSMOS_SDK_PATH/build/simd}"
@@ -68,25 +67,13 @@ log "simd: $SIMD_BIN"
 
 # --- Step 2: confirm picowallet pubkey ---------------------------------------
 #
-# In dialer-mode firmware the device doesn't listen, so pwctl can't reach it
-# as a server; supply the pubkey via PICOWALLET_PUBKEY_HEX env var instead.
-# In listener-mode firmware we can fetch it dynamically.
+# The cosmos driver is dialer-only -- the device dials cometbft, never the
+# other way around -- so pwctl can't query it for the pubkey. The operator
+# must supply PICOWALLET_PUBKEY_HEX via env var. Read it off the e-paper
+# splash screen, or get it once from TMKMS mode via `os.pubkey ed25519 m/0'`.
 
-if [ -n "${PICOWALLET_PUBKEY_HEX:-}" ]; then
-    log "using PICOWALLET_PUBKEY_HEX from env: $PICOWALLET_PUBKEY_HEX"
-else
-    log "fetching picowallet validator pubkey via SC (listener mode)..."
-    PICOWALLET_PUBKEY_HEX=$(
-        cd "$REPO_ROOT" &&
-        "$REPO_ROOT/.venv/bin/python" tools/pwctl.py \
-            --signing-seed "$PICOWALLET_SIGNING_SEED" \
-            --host "$PICOWALLET_HOST" --port "$PICOWALLET_SC_PORT" \
-            pubkey 2>&1 |
-        grep -oE '[a-f0-9]{64}' | head -1
-    )
-    [ -n "$PICOWALLET_PUBKEY_HEX" ] || \
-        fail "could not get picowallet pubkey -- set PICOWALLET_PUBKEY_HEX env var if device is in dialer mode"
-fi
+[ -n "${PICOWALLET_PUBKEY_HEX:-}" ] \
+    || fail "PICOWALLET_PUBKEY_HEX env var required (see scripts/README.md)"
 log "picowallet pubkey: $PICOWALLET_PUBKEY_HEX"
 
 # Cosmos pub-key JSON uses base64.
