@@ -113,16 +113,7 @@ TESTNET_DIR=/tmp/somewhere ./scripts/testnet.sh
 CHAIN_ID=my-chain          ./scripts/testnet.sh        # disables fresh-chain default
 COSMOS_SDK_PATH=...        ./scripts/testnet.sh
 P2P_BASE=29000             ./scripts/testnet.sh        # port range shift
-USE_BRIDGE=1               ./scripts/testnet.sh        # see below
 ```
-
-### Fallback: bridge mode (USE_BRIDGE=1)
-
-For situations where the device firmware can only listen (no dialer), set
-`USE_BRIDGE=1`. `scripts/picowallet-bridge.py` will dial both endpoints
-(cometbft's priv_validator_laddr listener and the device's listener on
-26660) and pipe bytes between them. Slower iteration loop (TCP forwarder
-in the middle) but lets you skip reflashing.
 
 ---
 
@@ -160,9 +151,8 @@ coexist in the same image without any rebuild between demos.
    cd /Volumes/Tendermint/gnolang/gno/gno.land
    go build -o ~/go/bin/gnoland ./cmd/gnoland
    ```
-2. **picowallet flashed with the same listener-capable firmware as
-   cosmos** (the dialer-build picowallet.uf2 works fine here since gno's
-   listener mode is independent of cosmos's dialer mode).
+2. **picowallet flashed** (single firmware drives both cosmos and gno
+   chain slots; no per-chain build flags).
 
 ### Per-run workflow
 
@@ -213,10 +203,10 @@ curl -s 'http://127.0.0.1:29657/block?height=5' | \
 ## Running both demos simultaneously
 
 The cosmos and gno demos use disjoint ports (28xxx vs 29xxx for cometbft
-P2P/RPC, plus 26690 for cosmos remote-signer listener vs 26659 for the
-device's gno listener). The dialer-build firmware exposes both endpoints
-at once, so the same physical picowallet can sign for both chains in
-parallel:
+P2P/RPC; 26690 for the cosmos node3 priv-validator listener that the
+device dials, 26659 for the gno chain slot the device listens on). One
+firmware image handles both at the same time -- the device dials its
+cosmos slot's target while listening on its gno slot's port:
 
 ```
 PICOWALLET_PUBKEY_HEX=... ./scripts/testnet.sh         # cosmos

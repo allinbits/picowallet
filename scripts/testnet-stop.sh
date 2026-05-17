@@ -2,7 +2,7 @@
 # Stop a testnet brought up by scripts/testnet.sh.
 set -euo pipefail
 TESTNET_DIR="${TESTNET_DIR:-$HOME/.picowallet-testnet}"
-for pidfile in "$TESTNET_DIR"/node*.pid "$TESTNET_DIR"/bridge.pid; do
+for pidfile in "$TESTNET_DIR"/node*.pid; do
     [ -f "$pidfile" ] || continue
     pid=$(cat "$pidfile")
     if kill -0 "$pid" 2>/dev/null; then

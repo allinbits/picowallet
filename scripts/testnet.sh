@@ -29,9 +29,6 @@ set -euo pipefail
 CHAIN_ID="${CHAIN_ID:-picowallet-testnet-$(date +%s)}"
 TESTNET_DIR="${TESTNET_DIR:-$HOME/.picowallet-testnet}"
 
-PICOWALLET_HOST="${PICOWALLET_HOST:-192.168.7.1}"
-PICOWALLET_SC_PORT="${PICOWALLET_SC_PORT:-26660}"
-
 COSMOS_SDK_PATH="${COSMOS_SDK_PATH:-/Volumes/Tendermint/cosmos-sdk}"
 SIMD_BIN="${SIMD_BIN:-$COSMOS_SDK_PATH/build/simd}"
 SIMD_BRANCH="${SIMD_BRANCH:-release/v0.50.x}"
@@ -198,26 +195,6 @@ done
 sed -i.bak \
     "s|^priv_validator_laddr = \"\"|priv_validator_laddr = \"tcp://0.0.0.0:$PRIVVAL_BASE\"|" \
     "$TESTNET_DIR/node3/config/config.toml"
-
-# --- Step 11: optionally launch the picowallet bridge -----------------------
-#
-# Default: the device runs in dialer-mode firmware and connects to cometbft
-# directly, so no bridge is needed.
-#
-# Fallback: if the device is running listener-mode firmware (both ends are
-# servers), set USE_BRIDGE=1 to launch scripts/picowallet-bridge.py, which
-# dials both endpoints and pipes bytes between them. The bridge keeps
-# retrying cometbft until node3 is up -- which gets us under cometbft's
-# 3-second accept timeout for the signer.
-
-if [ "${USE_BRIDGE:-0}" = "1" ]; then
-    log "starting picowallet <-> cometbft bridge (USE_BRIDGE=1)"
-    python3 "$REPO_ROOT/scripts/picowallet-bridge.py" \
-            --cometbft-host 127.0.0.1 --cometbft-port "$PRIVVAL_BASE" \
-            --picowallet-host "$PICOWALLET_HOST" --picowallet-port "$PICOWALLET_SC_PORT" \
-            > "$TESTNET_DIR/logs/bridge.log" 2>&1 &
-    echo "$!" > "$TESTNET_DIR/bridge.pid"
-fi
 
 log "starting 4 cometbft nodes; logs in $TESTNET_DIR/logs/"
 for i in 0 1 2 3; do

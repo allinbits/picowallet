@@ -294,8 +294,6 @@ Subtasks:
 - `scripts/gno_testnet.sh`: same shape for a 4-validator gnoland testnet;
   node3's `remote_signer.server_address` points at the device's gno
   listener (gno's polarity is inverted).
-- `scripts/picowallet-bridge.py`: optional bridge mode for setups where
-  the firmware can only listen.
 
 ### ✓ M8 — Per-chain multitenancy
 
