@@ -8,6 +8,10 @@
 #include "os/storage/hwm_flash.h"
 #include "os/storage/flash_layout.h"
 
+#if PICOWALLET_TRUSTZONE
+#include "os/secure_api.h"
+#endif
+
 // ---- Per-slot rolling-log HWM storage ----
 //
 // HWM region (1 MB) is partitioned into HWM_TOTAL_SLOTS=16 contiguous
@@ -149,16 +153,37 @@ static void write_record(uint32_t sector, uint32_t rec,
     r->type          = s->type;
     memset(r->reserved1, 0, sizeof(r->reserved1));
     r->cksum         = cksum_of(r);
+#if PICOWALLET_TRUSTZONE
+    // Decompose absolute (sector, rec) into (slot_idx, page_in_slot)
+    // for the Secure-side flash veneer. The veneer is the only path
+    // that NS can drive a flash program through on RP2350.
+    uint8_t slot_idx       = (uint8_t)(sector / HWM_SECTORS_PER_SLOT);
+    uint32_t sector_in_slot = sector % HWM_SECTORS_PER_SLOT;
+    uint16_t page_in_slot  = (uint16_t)(sector_in_slot * (HWM_SECTOR_SIZE / HWM_PAGE_SIZE)
+                                       + rec / HWM_RECS_PER_PAGE);
+    s_flash_write_hwm_page(slot_idx, page_in_slot, page, HWM_PAGE_SIZE);
+#else
     flash_range_program(page_offset_for_rec(sector, rec), page, HWM_PAGE_SIZE);
+#endif
 }
 
 static void erase_sector(uint32_t sector) {
+#if PICOWALLET_TRUSTZONE
+    uint8_t slot_idx        = (uint8_t)(sector / HWM_SECTORS_PER_SLOT);
+    uint8_t sector_in_slot  = (uint8_t)(sector % HWM_SECTORS_PER_SLOT);
+    s_flash_erase_hwm_sector(slot_idx, sector_in_slot);
+#else
     flash_range_erase(sector_offset(sector), HWM_SECTOR_SIZE);
+#endif
 }
 
 static void erase_slot_region(uint8_t slot_idx) {
+#if PICOWALLET_TRUSTZONE
+    s_flash_erase_hwm_slot(slot_idx);
+#else
     flash_range_erase(sector_offset(abs_sector(slot_idx, 0)),
                       HWM_SECTORS_PER_SLOT * HWM_SECTOR_SIZE);
+#endif
 }
 
 // ---- boot scan ----------------------------------------------------------
@@ -308,9 +333,13 @@ void hwm_wipe_slot(uint8_t slot_idx) {
 }
 
 void hwm_flash_wipe(void) {
+#if PICOWALLET_TRUSTZONE
+    s_flash_erase_hwm_all();
+#else
     uint32_t ints = save_and_disable_interrupts();
     flash_range_erase(HWM_FLASH_OFFSET, HWM_FLASH_SIZE);
     restore_interrupts(ints);
+#endif
     memset(s_slots, 0, sizeof(s_slots));
     for (uint8_t i = 0; i < HWM_TOTAL_SLOTS; i++) {
         s_slots[i].next_seq = 1;

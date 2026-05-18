@@ -22,9 +22,21 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 #include <arm_cmse.h>
 
+#include "hardware/flash.h"
+#include "hardware/sync.h"
+
 #include "os/secure_api.h"
+#include "os/storage/flash_layout.h"
+
+// HWM layout constants -- mirror hwm_flash.c. Phase 2c will fold this into
+// a single Secure-side storage module once the keystore moves over.
+#define HWM_SECTOR_SIZE        4096u
+#define HWM_TOTAL_SLOTS_LOCAL  16u
+#define HWM_SECTORS_PER_SLOT   (HWM_FLASH_SIZE / HWM_SECTOR_SIZE / HWM_TOTAL_SLOTS_LOCAL)
+#define HWM_BYTES_PER_SLOT     (HWM_SECTORS_PER_SLOT * HWM_SECTOR_SIZE)
 
 // --- Phase 2a smoke-test veneer -------------------------------------------
 //
@@ -34,4 +46,78 @@
 __attribute__((cmse_nonsecure_entry))
 uint32_t s_phase2_test(uint32_t x) {
     return x ^ 0xA5A5A5A5u;
+}
+
+// --- Phase 2b: flash veneers --------------------------------------------
+//
+// Each function below is a Secure Gateway entry into Secure flash code.
+// The pointer-bearing veneers MUST validate the buffer is in NS memory
+// before reading. cmse_check_pointed_object() returns NULL if the buffer
+// straddles Secure memory or is not NS-readable, in which case the
+// veneer refuses with NEG_PTR. This is the M9 boundary's primary
+// argument-validation primitive.
+#define M9_NEG_PTR    (-101)
+#define M9_NEG_RANGE  (-102)
+
+__attribute__((cmse_nonsecure_entry))
+int s_flash_write_chains_page(const void *page, size_t len) {
+    if (len != CHAINS_FLASH_SIZE) return M9_NEG_RANGE;
+    const void *checked = cmse_check_address_range(
+        (void *)page, len, CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!checked) return M9_NEG_PTR;
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(CHAINS_FLASH_OFFSET, CHAINS_FLASH_SIZE);
+    flash_range_program(CHAINS_FLASH_OFFSET, (const uint8_t *)checked, len);
+    restore_interrupts(ints);
+    return 0;
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_flash_erase_hwm_slot(uint8_t slot_idx) {
+    if (slot_idx >= HWM_TOTAL_SLOTS_LOCAL) return M9_NEG_RANGE;
+    uint32_t off = HWM_FLASH_OFFSET + (uint32_t)slot_idx * HWM_BYTES_PER_SLOT;
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(off, HWM_BYTES_PER_SLOT);
+    restore_interrupts(ints);
+    return 0;
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_flash_erase_hwm_sector(uint8_t slot_idx, uint8_t sector_in_slot) {
+    if (slot_idx >= HWM_TOTAL_SLOTS_LOCAL) return M9_NEG_RANGE;
+    if (sector_in_slot >= HWM_SECTORS_PER_SLOT) return M9_NEG_RANGE;
+    uint32_t off = HWM_FLASH_OFFSET
+                 + (uint32_t)slot_idx * HWM_BYTES_PER_SLOT
+                 + (uint32_t)sector_in_slot * HWM_SECTOR_SIZE;
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(off, HWM_SECTOR_SIZE);
+    restore_interrupts(ints);
+    return 0;
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_flash_erase_hwm_all(void) {
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(HWM_FLASH_OFFSET, HWM_FLASH_SIZE);
+    restore_interrupts(ints);
+    return 0;
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_flash_write_hwm_page(uint8_t slot_idx, uint16_t page_in_slot,
+                           const void *page, size_t len) {
+    if (slot_idx >= HWM_TOTAL_SLOTS_LOCAL) return M9_NEG_RANGE;
+    if (len != 256u) return M9_NEG_RANGE;        // pico-sdk FLASH_PAGE_SIZE
+    uint32_t slot_pages = HWM_BYTES_PER_SLOT / 256u;
+    if (page_in_slot >= slot_pages) return M9_NEG_RANGE;
+    const void *checked = cmse_check_address_range(
+        (void *)page, len, CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!checked) return M9_NEG_PTR;
+    uint32_t off = HWM_FLASH_OFFSET
+                 + (uint32_t)slot_idx * HWM_BYTES_PER_SLOT
+                 + (uint32_t)page_in_slot * 256u;
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_program(off, (const uint8_t *)checked, len);
+    restore_interrupts(ints);
+    return 0;
 }

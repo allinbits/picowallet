@@ -42,6 +42,8 @@ target_link_options(picowallet_secure PRIVATE
 target_link_libraries(picowallet_secure
     pico_stdlib
     pico_bootrom   # reset_usb_boot fallback when the NS slot is empty
+    hardware_flash # Phase 2b: flash_range_erase / flash_range_program
+    hardware_sync  # Phase 2b: save_and_disable_interrupts around flash ops
 )
 
 pico_set_linker_script(picowallet_secure

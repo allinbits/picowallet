@@ -26,6 +26,24 @@
 // any real veneer is in place. Delete once Phase 2b ships.
 uint32_t s_phase2_test(uint32_t x);
 
+// --- Phase 2b transitional flash veneers ----------------------------------
+// Sub-veneers for the persistent-flash regions that NS cannot touch on
+// RP2350 (flash mutations are Secure-only). Each is at the "construct
+// a page in NS, hand it to Secure to write" granularity rather than the
+// typed M9.2 ABI (s_chains_add etc.); NS still owns the validation and
+// in-RAM cache of the chain config, Secure only owns the flash erase +
+// program. Phase 2c re-tightens this with the proper typed veneers
+// once the keystore migrates and Secure owns chain/HWM state directly.
+//
+// Returns 0 on success, negative status_t on failure (page too large,
+// pointer not in NS memory, ...).
+int s_flash_write_chains_page(const void *page, size_t len);
+int s_flash_erase_hwm_slot(uint8_t slot_idx);
+int s_flash_erase_hwm_sector(uint8_t slot_idx, uint8_t sector_in_slot);
+int s_flash_erase_hwm_all(void);
+int s_flash_write_hwm_page(uint8_t slot_idx, uint16_t page_in_slot,
+                           const void *page, size_t len);
+
 // --- Crypto + signing -----------------------------------------------------
 
 // Derive a public key for `curve` at `path` from the Secure-owned seed.

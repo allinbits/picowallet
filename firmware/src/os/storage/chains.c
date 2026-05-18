@@ -8,6 +8,10 @@
 #include "os/storage/flash_layout.h"
 #include "os/storage/hwm_flash.h"
 
+#if PICOWALLET_TRUSTZONE
+#include "os/secure_api.h"
+#endif
+
 // Single-sector erase-and-rewrite layout. Admin operations are rare (operator
 // edits config via TMKMS-mode REPL), so even at one rewrite/day the 100K-cycle
 // flash spec gives ~270 years. No log/ring needed.
@@ -58,10 +62,17 @@ static void persist(void) {
     memcpy(rec->gno,    s_gno,    sizeof(rec->gno));
     rec->cksum   = cksum_of(rec);
 
+#if PICOWALLET_TRUSTZONE
+    // Phase 2b: flash mutations are Secure-only on RP2350 (the bootrom
+    // doesn't expose the raw flash_range_* path to NS). Hand the page
+    // to the Secure-side veneer which performs the erase + program.
+    s_flash_write_chains_page(page, CHAINS_REC_SIZE);
+#else
     uint32_t ints = save_and_disable_interrupts();
     flash_range_erase(CHAINS_FLASH_OFFSET, CHAINS_FLASH_SIZE);
     flash_range_program(CHAINS_FLASH_OFFSET, page, CHAINS_REC_SIZE);
     restore_interrupts(ints);
+#endif
 }
 
 void chains_init(void) {
