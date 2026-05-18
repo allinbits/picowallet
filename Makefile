@@ -15,7 +15,8 @@ SUB_MARKER    := third_party/pico-sdk/pico_sdk_init.cmake
 # Default target — invoking `make` with no args builds the firmware.
 .DEFAULT_GOAL := build
 
-.PHONY: help build clean distclean submodules flash venv test repl size m9-build m9-clean
+.PHONY: help build clean distclean submodules flash venv test repl size \
+        m9-build m9-clean m9-openocd m9-attach m9-attach-ns m9-flash-probe
 
 help: ## show this help
 	@awk 'BEGIN {FS = ":.*?## "} \
@@ -41,6 +42,45 @@ clean: ## wipe firmware/build/
 
 m9-clean: ## wipe firmware/build_m9/
 	rm -rf $(M9_BUILD_DIR)
+
+m9-openocd: ## start openocd for the Pi debug probe (foreground; ctrl-C to stop)
+	@which openocd > /dev/null || (echo "openocd not found -- brew install openocd"; exit 1)
+	openocd -f interface/cmsis-dap.cfg -c "adapter speed 5000" -f target/rp2350.cfg
+
+# Attach gdb to a running chip via SWD. Run `make m9-openocd` in a
+# separate terminal first. Halts the CPU, dumps PC/LR/SP and the S- and
+# NS-side fault status registers, then drops to the gdb prompt.
+m9-attach: ## attach gdb to the secure stub via probe (needs `make m9-openocd`)
+	arm-none-eabi-gdb \
+	    -ex "target extended-remote :3333" \
+	    -ex "monitor halt" \
+	    -ex "info reg pc lr msp psp control" \
+	    -ex "printf \"--- S-side fault regs ---\\n\"" \
+	    -ex "monitor mdw 0xe000ed28 1" \
+	    -ex "monitor mdw 0xe000ed2c 1" \
+	    -ex "monitor mdw 0xe000ed38 1" \
+	    -ex "printf \"--- NS-side fault regs ---\\n\"" \
+	    -ex "monitor mdw 0xe002ed28 1" \
+	    -ex "monitor mdw 0xe002ed2c 1" \
+	    -ex "monitor mdw 0xe002ed38 1" \
+	    $(M9_BUILD_DIR)/m9/picowallet_secure.elf
+
+# Same but loads symbols from the Non-Secure ELF so `info line *<PC>` and
+# `bt` work after BXNS into NS code.
+m9-attach-ns: ## attach gdb with NS symbols loaded (use this if PC is past 0x10080000)
+	arm-none-eabi-gdb \
+	    -ex "target extended-remote :3333" \
+	    -ex "monitor halt" \
+	    -ex "info reg pc lr msp psp control" \
+	    -ex "monitor mdw 0xe002ed28 1" \
+	    -ex "monitor mdw 0xe002ed2c 1" \
+	    -ex "monitor mdw 0xe002ed38 1" \
+	    $(M9_BUILD_DIR)/picowallet.elf
+
+# Flash via the debug probe (no BOOTSEL needed once the probe is wired).
+m9-flash-probe: m9-build ## build then flash picowallet_m9.uf2 via SWD
+	picotool load -f -d $(M9_UF2_COMBINED)
+	picotool reboot -d
 
 distclean: clean m9-clean ## wipe both build dirs AND .venv/
 	rm -rf $(VENV)
