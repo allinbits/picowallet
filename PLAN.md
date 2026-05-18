@@ -391,9 +391,17 @@ Secure prompt and cannot drive the display peripheral itself.
 int  s_get_pubkey(uint8_t curve, const char *path,
                   uint8_t *out, size_t out_size, size_t *out_len);
 
+// Sign the 32-byte SecretConnection challenge. Length-locked at 32 so
+// this veneer cannot be abused to sign privval messages outside the
+// HWM-gated path below.
+int  s_sign_sc_challenge(uint8_t curve, const char *path,
+                         const uint8_t challenge[32], uint8_t out_sig[64]);
+
 // Atomic: validate strict-advance against the slot's HWM, append the
 // new HWM record, sign the canonical bytes, return the signature.
-// Returns 0 on success; negative status_t on any failure.
+// Secure looks up the slot's chain_id internally (NS cannot lie about
+// it). Returns 0 on success; -1 if HWM rejected; negative status_t on
+// other failures.
 int  s_sign_and_advance(uint8_t curve, const char *path,
                         uint8_t hwm_slot_idx,
                         int32_t type, int64_t height, int32_t round,
