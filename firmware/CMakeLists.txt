@@ -136,6 +136,9 @@ if(PICOWALLET_TRUSTZONE)
     # Secure stub do the bootrom-state reset before BXNS, and skip the
     # NS-side initializers entirely.
     target_compile_definitions(picowallet PRIVATE
+        # Surface the TZ mode at C level so source files can #if-guard
+        # cmse-aware code paths (veneer call sites, secure_api.h include).
+        PICOWALLET_TRUSTZONE=1
         # Bootrom-touching: the lookup table NS sees doesn't include these
         # functions, so NS-side lookup returns 0 and crashes the image.
         PICO_RUNTIME_NO_INIT_BOOTROM_RESET=1
@@ -190,6 +193,17 @@ if(PICOWALLET_TRUSTZONE)
         PICO_RAND_SEED_ENTROPY_SRC_BOARD_ID=0
     )
     add_subdirectory(m9)
+    # Phase 2: NS image links against the import library that the Secure
+    # link produces (`--cmse-implib --out-implib=...`). Each s_*() symbol
+    # in this archive resolves to the absolute address of the SG stub in
+    # the NSC region, so NS calls land in the Secure Gateway and switch
+    # state. picowallet must depend on picowallet_secure so the implib
+    # is built first.
+    add_dependencies(picowallet picowallet_secure)
+    target_link_libraries(picowallet ${M9_NSC_IMPLIB})
+    target_include_directories(picowallet PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/src   # already-on path via SDK, but make explicit
+    )
     message(STATUS "M9: TrustZone-M dual-image build (picowallet + picowallet_secure)")
 else()
     message(STATUS "M9: TrustZone-M split disabled (PICOWALLET_TRUSTZONE=OFF)")

@@ -10,10 +10,12 @@
 
 add_executable(picowallet_secure
     secure_stub.c
+    veneers.c
 )
 
 target_include_directories(picowallet_secure PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}     # for layout.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src   # for os/secure_api.h
 )
 
 # -mcmse turns on TrustZone-M code generation:
@@ -21,7 +23,21 @@ target_include_directories(picowallet_secure PRIVATE
 #   - enables __attribute__((cmse_nonsecure_entry)) and friends
 #   - lets the linker pull in cmse_nonsecure_call.o from libgcc
 target_compile_options(picowallet_secure PRIVATE -mcmse)
-target_link_options(picowallet_secure PRIVATE -mcmse)
+
+# --cmse-implib: emit Secure Gateway veneers for cmse_nonsecure_entry
+#   functions into .gnu.sgstubs (memmap_secure.ld places it at the NSC
+#   base).
+# --out-implib=<file>: write an import library naming each veneer at its
+#   absolute address; the NS image links against this so its calls to
+#   s_*() resolve to the SG stub in the NSC region rather than to a
+#   Secure-side function the NS linker can't see.
+set(M9_NSC_IMPLIB ${CMAKE_CURRENT_BINARY_DIR}/picowallet_secure_implib.a
+    CACHE INTERNAL "Path to the NSC import library used by the NS link")
+target_link_options(picowallet_secure PRIVATE
+    -mcmse
+    -Wl,--cmse-implib
+    -Wl,--out-implib=${M9_NSC_IMPLIB}
+)
 
 target_link_libraries(picowallet_secure
     pico_stdlib

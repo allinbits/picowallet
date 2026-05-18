@@ -20,6 +20,12 @@
 // change to the trust boundary.
 // ============================================================================
 
+// --- Phase 2a smoke test --------------------------------------------------
+// Trivial round-trip veneer: NS passes a value, Secure returns it XORed
+// with 0xA5A5A5A5. Lets us assert the SG/BXNS gateway path works before
+// any real veneer is in place. Delete once Phase 2b ships.
+uint32_t s_phase2_test(uint32_t x);
+
 // --- Crypto + signing -----------------------------------------------------
 
 // Derive a public key for `curve` at `path` from the Secure-owned seed.

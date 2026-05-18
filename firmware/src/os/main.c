@@ -25,6 +25,10 @@
 #include "os/storage/hwm_flash.h"
 #include "os/storage/chains.h"
 
+#if PICOWALLET_TRUSTZONE
+#include "os/secure_api.h"
+#endif
+
 #define LED_PIN PICO_DEFAULT_LED_PIN
 
 int main(void) {
@@ -33,6 +37,24 @@ int main(void) {
 
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
+
+#if PICOWALLET_TRUSTZONE
+    // Phase 2a smoke-test: cross the NS->S boundary once before doing
+    // anything else. If the veneer round-trips correctly, the SG path
+    // and the implib link both worked.
+    volatile uint32_t veneer_out = s_phase2_test(0x12345678u);
+    volatile uint32_t veneer_expect = 0x12345678u ^ 0xA5A5A5A5u;
+    if (veneer_out != veneer_expect) {
+        // SG path broken; hang here with LED off so we notice. Loop
+        // toggles LED slowly so the failure mode is distinct from a
+        // generic hardfault.
+        gpio_set_dir(LED_PIN, GPIO_OUT);
+        for (;;) {
+            gpio_put(LED_PIN, 0); for (volatile int i = 0; i < 8000000; i++);
+            gpio_put(LED_PIN, 1); for (volatile int i = 0; i < 2000000; i++);
+        }
+    }
+#endif
 
     display_init();
     input_init();

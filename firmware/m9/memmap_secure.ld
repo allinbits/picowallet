@@ -42,6 +42,13 @@ SECTIONS
         *(.init)
         *libgcc.a:cmse_nonsecure_call.o
         *(EXCLUDE_FILE(*libgcc.a: *libc.a:*lib_a-mem*.o *libm.a:) .text*)
+        /* The Secure stub is timing-uncritical; keep .time_critical.*
+         * in flash instead of letting the .data section pull it into
+         * RAM. Otherwise Thumb BL from .text (flash) can't reach the
+         * RAM-resident .time_critical helpers (pico-sdk mutex code
+         * pulled in via the cmse_nonsecure_call helpers) -- the gap
+         * is 256MB, way past +/-16MB BL range. */
+        *(.time_critical*)
         *(.fini)
 
         *crtbegin.o(.ctors)
@@ -109,11 +116,12 @@ SECTIONS
 
     /* Non-Secure Callable veneer region. Functions marked with
      *   __attribute__((cmse_nonsecure_entry))
-     * land here via the .gnu.sgstubs section the toolchain emits. SAU
-     * region 0 covers exactly this range and grants NS read+execute. */
-    .nsc : ALIGN(32) {
+     * get an SG stub emitted by the linker (with --cmse-implib) into
+     * the .gnu.sgstubs output section. ld's stub generator REQUIRES
+     * this exact section name -- it can't be wrapped in another. SAU
+     * region 0 covers this range and grants NS read+execute. */
+    .gnu.sgstubs : ALIGN(32) {
         __nsc_start = .;
-        *(.gnu.sgstubs*)
         . = ALIGN(32);
         __nsc_end = .;
     } > NSC
