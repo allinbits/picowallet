@@ -39,20 +39,20 @@ handler point outside their expected regions), it calls
 -- no need to hold the button. The same recovery fires if a future
 NS-side flash gets interrupted mid-write.
 
-## LED diagnostics (Phase 1c)
+## LED diagnostics
 
-The secure stub uses the onboard LED as a side channel because there's
-no UART/USB/display available at that point.
+The secure stub keeps the LED reserved as a side channel for the
+defensive bricking-recovery path. The boot-time success-blink that ran
+in early Phase 1 has been removed -- it cost ~1.5 s on every boot and
+the path is now solid enough not to need a witness.
 
 | What you see | What it means |
 |---|---|
-| LED never lights | bootrom rejected the .uf2 (run `picotool info` on it) OR `main()` faulted before LED init |
+| LED never lights, no splash | bootrom rejected the .uf2 (run `picotool info` on it) OR Secure stub faulted before reaching the NS image |
 | 1 long blink → BOOTSEL | NS vector table is `0xFFFFFFFF` (NS image not flashed) |
 | 2 long blinks → BOOTSEL | NS initial SP outside `0x20020000..0x20082000` |
 | 3 long blinks → BOOTSEL | NS reset handler outside `0x10080000..0x10400000` |
-| Long-on, off, long-on, off, long-on, off | Validation passed; BXNS to NS is the next instruction. Anything after this point is Non-Secure code |
-| After the 3-blink pattern, NS firmware boots normally | Phase 1 is working |
-| After the 3-blink pattern, LED stays off and nothing else happens | BXNS attempted but NS code faulted on its first instruction (likely ACCESSCTRL blocking some peripheral). Time for gdb. |
+| Splash on the e-paper, then mode select | Phase 1 working |
 
 ## Debugging via the Pi debug probe
 

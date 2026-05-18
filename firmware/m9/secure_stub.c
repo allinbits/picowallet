@@ -200,18 +200,10 @@ static void m9_branch_to_nonsecure(void) {
         led_blink_n_then_bootsel(rc);   // no return
         __builtin_unreachable();
     }
-
-    // Validation passed. Signal that with 5 distinct blinks (was 3 in
-    // 1c.2 / 1c.4 -- the bump is a re-flash witness so we know we're
-    // running THIS build, not the previous one). After the blinks we
-    // leave the LED OFF so any LED activity afterward is Non-Secure
-    // code, not us.
-    for (int i = 0; i < 5; i++) {
-        gpio_put(LED_PIN, 1);
-        busy_wait_long();
-        gpio_put(LED_PIN, 0);
-        busy_wait_long();
-    }
+    // The boot-time success-blink was a Phase 1 diagnostic; removed
+    // now that the SAU + ACCESSCTRL + bootrom-NS plumbing is debugged.
+    // The error-blink path above is kept -- a corrupt NS slot still
+    // drops to BOOTSEL with a 1/2/3 long-blink count for diagnosis.
 
     // Set NS MSP. MSP_NS is the Non-Secure Main Stack Pointer alias;
     // only Secure code can write it. Requires -mcmse on the toolchain.

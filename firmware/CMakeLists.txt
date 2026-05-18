@@ -170,6 +170,24 @@ if(PICOWALLET_TRUSTZONE)
         # so skip the whole step.
         PICO_RUNTIME_NO_INIT_PER_CORE_ENABLE_COPROCESSORS=1
         PICO_RUNTIME_SKIP_INIT_PER_CORE_ENABLE_COPROCESSORS=1
+        # Force NS gpio_*() to use memory-mapped SIO instead of the
+        # gpioc coprocessor (CP0). The Secure stub opens CP0 for NS via
+        # NSACR + CPACR_NS, but empirically gpio_get() reads through CP0
+        # return stale/wrong values from NS state on RP2350 -- button
+        # presses don't register even though the live SIO_GPIO_IN bit
+        # toggles correctly. Falling back to the SIO MMIO path makes
+        # NS gpio reads match what the hardware actually shows.
+        PICO_USE_GPIO_COPROCESSOR=0
+        # pico_rand's default entropy mix includes a call to bootrom's
+        # GET_SYS_INFO(SYS_INFO_BOOT_RANDOM). Like SYS_INFO_CHIP_INFO,
+        # that sub-code faults from NS state inside the bootrom even
+        # though GET_SYS_INFO as a whole is NS-callable. Disable that
+        # source -- pico_rand falls back to ROSC drift + (skipped)
+        # board ID, which is enough for lwIP's UDP source-port salt
+        # in Phase 1. Phase 2's s_random veneer is the real entropy
+        # path for SC handshakes.
+        PICO_RAND_SEED_ENTROPY_SRC_BOOT_RANDOM=0
+        PICO_RAND_SEED_ENTROPY_SRC_BOARD_ID=0
     )
     add_subdirectory(m9)
     message(STATUS "M9: TrustZone-M dual-image build (picowallet + picowallet_secure)")
