@@ -25,32 +25,67 @@
 
 #include "hardware/structs/sau.h"
 #include "pico/bootrom.h"
+#include "pico/stdlib.h"
 
 #include "layout.h"
+
+// ---- Phase 1c diagnostic LED blink ---------------------------------------
+//
+// The Secure stub has no UART / USB / display to tell the operator what
+// happened, so we use the onboard LED as a side channel. The exact
+// pattern the operator sees on flash:
+//
+//   1 long blink, then BOOTSEL  -> NS vector table is 0xFFFFFFFF
+//                                  (NS image not flashed / erased)
+//   2 long blinks, then BOOTSEL -> NS initial SP is out of NS SRAM range
+//   3 long blinks, then BOOTSEL -> NS reset handler is out of NS flash range
+//   solid LED for ~1 s then off -> validation passed; BXNS to NS in progress.
+//                                  If BOOTSEL appears after that, the fault
+//                                  is on the NS side (e.g. ACCESSCTRL blocks
+//                                  NS access to some peripheral).
+//   LED never lights up         -> the Secure stub never ran (bootrom
+//                                  rejected the image, or main() faulted
+//                                  before this point).
+//
+// All blink delays are busy-loop based -- no SysTick, no timer, no IRQs.
+
+#define LED_PIN PICO_DEFAULT_LED_PIN
+
+static void busy_wait_short(void) { for (volatile int i = 0; i < 4000000; i++); }
+static void busy_wait_long (void) { for (volatile int i = 0; i <12000000; i++); }
+
+static void led_init(void) {
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+    gpio_put(LED_PIN, 0);
+}
+
+static void led_blink_n_then_bootsel(int n) {
+    for (int i = 0; i < n; i++) {
+        gpio_put(LED_PIN, 1);
+        busy_wait_long();
+        gpio_put(LED_PIN, 0);
+        busy_wait_short();
+    }
+    // Give the operator a moment to count, then drop to BOOTSEL.
+    busy_wait_long();
+    reset_usb_boot(0, 0);
+}
 
 // NS view of the System Control Block VTOR register. Set this before
 // BXNS so the core finds the NS image's vector table on entry.
 #define SCB_NS_VTOR_PTR  ((volatile uint32_t *)0xE002ED08u)
 
-// Validate the NS image's vector table before we jump into it. If the
-// NS image hasn't been flashed yet (the slot is erased: 0xFFFFFFFF) or
-// the pointers are nonsense, fault->lockup makes the device unflashable
-// without holding BOOTSEL on power-on. Instead we drop straight to USB
-// BOOTSEL so the operator can flash the NS image without re-cycling
-// the BOOTSEL button. Same goes for any future situation where the NS
-// image is corrupted -- we recover via re-flash rather than brick.
-static int ns_image_looks_valid(uint32_t ns_msp, uint32_t ns_reset) {
-    // Erased flash sentinel.
-    if (ns_msp == 0xFFFFFFFFu || ns_reset == 0xFFFFFFFFu) return 0;
-    // Initial SP must point into NS SRAM (incl. scratch banks).
+// Validate the NS image's vector table. Returns the blink-code on failure
+// (1..3 per the table at the top of this file) or 0 on success.
+static int validate_ns_image(uint32_t ns_msp, uint32_t ns_reset) {
+    if (ns_msp == 0xFFFFFFFFu || ns_reset == 0xFFFFFFFFu) return 1;
     if (ns_msp < M9_NONSECURE_SRAM_BASE
-        || ns_msp > (M9_SCRATCH_Y_BASE + M9_SCRATCH_Y_SIZE)) return 0;
-    // Reset handler must point into NS flash. Mask off the Thumb bit
-    // (set by the toolchain on all function pointers).
+        || ns_msp > (M9_SCRATCH_Y_BASE + M9_SCRATCH_Y_SIZE)) return 2;
     uint32_t entry = ns_reset & ~1u;
     if (entry < M9_NONSECURE_FLASH_BASE
-        || entry >= (M9_FLASH_BASE + M9_FLASH_SIZE)) return 0;
-    return 1;
+        || entry >= (M9_FLASH_BASE + M9_FLASH_SIZE)) return 3;
+    return 0;
 }
 
 static void m9_sau_program(void) {
@@ -88,22 +123,22 @@ static void m9_sau_program(void) {
 
 __attribute__((noreturn))
 static void m9_branch_to_nonsecure(void) {
-    // Vector table layout at the NS image's base:
-    //   word 0: initial SP
-    //   word 1: reset handler entry (Thumb, so bit 0 is set in the
-    //           pointer; we mask it off below to indicate "switch to
-    //           NS" semantics for BXNS).
     uint32_t *ns_vt    = (uint32_t *)M9_NONSECURE_FLASH_BASE;
     uint32_t  ns_msp   = ns_vt[0];
     uint32_t  ns_reset = ns_vt[1];
 
-    if (!ns_image_looks_valid(ns_msp, ns_reset)) {
-        // NS image absent or corrupted. Don't BXNS into garbage --
-        // hand control back to the boot ROM's USB BOOTSEL flow so the
-        // operator can drop a fresh .uf2 in. reset_usb_boot is
-        // noreturn.
-        reset_usb_boot(0, 0);
+    int rc = validate_ns_image(ns_msp, ns_reset);
+    if (rc != 0) {
+        led_blink_n_then_bootsel(rc);   // no return
+        __builtin_unreachable();
     }
+
+    // Validation passed: LED solid on while we set up + BXNS, so the
+    // operator sees one steady blink rather than the count-and-recover
+    // pattern above. The LED stays on through BXNS; NS code can turn
+    // it off whenever it likes (e.g., the existing liveness blinker).
+    gpio_put(LED_PIN, 1);
+    busy_wait_long();
 
     // Set NS MSP. MSP_NS is the Non-Secure Main Stack Pointer alias;
     // only Secure code can write it. Requires -mcmse on the toolchain.
@@ -124,12 +159,13 @@ static void m9_branch_to_nonsecure(void) {
 }
 
 int main(void) {
-    m9_sau_program();
+    led_init();
     // ACCESSCTRL configuration deferred to Phase 4. The reset defaults
     // (after the boot ROM's setup) let Core0 in NS state reach the
     // USB / GPIO / SPI peripherals the existing firmware uses. TRNG
     // and SHA stay Secure-only -- NS will get those via veneers in
     // Phase 2.x.
+    m9_sau_program();
     m9_branch_to_nonsecure();
     __builtin_unreachable();
 }
