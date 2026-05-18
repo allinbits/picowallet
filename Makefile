@@ -1,18 +1,21 @@
 # PicoWallet — thin wrapper over CMake + the host test harness.
 # Run `make help` for available targets.
 
-BUILD_DIR  := firmware/build
-UF2        := $(BUILD_DIR)/picowallet.uf2
-ELF        := $(BUILD_DIR)/picowallet.elf
-VENV       := .venv
-PYTHON     := $(VENV)/bin/python
-PIP        := $(VENV)/bin/pip
-SUB_MARKER := third_party/pico-sdk/pico_sdk_init.cmake
+BUILD_DIR     := firmware/build
+M9_BUILD_DIR  := firmware/build_m9
+UF2           := $(BUILD_DIR)/picowallet.uf2
+ELF           := $(BUILD_DIR)/picowallet.elf
+M9_UF2_NS     := $(M9_BUILD_DIR)/picowallet.uf2
+M9_UF2_S      := $(M9_BUILD_DIR)/m9/picowallet_secure.uf2
+VENV          := .venv
+PYTHON        := $(VENV)/bin/python
+PIP           := $(VENV)/bin/pip
+SUB_MARKER    := third_party/pico-sdk/pico_sdk_init.cmake
 
 # Default target — invoking `make` with no args builds the firmware.
 .DEFAULT_GOAL := build
 
-.PHONY: help build clean distclean submodules flash venv test repl size
+.PHONY: help build clean distclean submodules flash venv test repl size m9-build m9-clean
 
 help: ## show this help
 	@awk 'BEGIN {FS = ":.*?## "} \
@@ -24,10 +27,20 @@ build: submodules ## build firmware (default target)
 	@cmake --build $(BUILD_DIR) -j
 	@echo "==> $(UF2)"
 
+m9-build: submodules ## build the M9 TrustZone dual-image (Secure stub + NS image)
+	@cmake -S firmware -B $(M9_BUILD_DIR) -DPICOWALLET_TRUSTZONE=ON -Wno-dev > /dev/null
+	@cmake --build $(M9_BUILD_DIR) -j
+	@echo "==> $(M9_UF2_S)"
+	@echo "==> $(M9_UF2_NS)"
+	@echo "    drag both .uf2 files (Secure first) to RPI-RP2 in BOOTSEL mode"
+
 clean: ## wipe firmware/build/
 	rm -rf $(BUILD_DIR)
 
-distclean: clean ## wipe firmware/build/ AND .venv/
+m9-clean: ## wipe firmware/build_m9/
+	rm -rf $(M9_BUILD_DIR)
+
+distclean: clean m9-clean ## wipe both build dirs AND .venv/
 	rm -rf $(VENV)
 
 # Marker file means we don't re-run submodule update on every build.

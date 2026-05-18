@@ -111,3 +111,23 @@ target_link_libraries(picowallet
 pico_enable_stdio_usb(picowallet 0)
 pico_enable_stdio_uart(picowallet 0)
 pico_add_extra_outputs(picowallet)
+
+if(PICOWALLET_TRUSTZONE)
+    # M9 Phase 1b: dual-image build.
+    #
+    #   1. The existing `picowallet` target now links at the Non-Secure
+    #      flash base (0x10080000) using firmware/m9/memmap_nonsecure.ld.
+    #   2. firmware/m9/CMakeLists.txt defines a second target,
+    #      `picowallet_secure`, that produces a tiny Secure-side image
+    #      linked at 0x10000000 (SAU configuration + BXNS to NS).
+    #
+    # Boot ROM enters the Secure image; the Secure stub then transfers
+    # control to the Non-Secure image. Operator flashes both .uf2 files
+    # (combining into one .uf2 is a follow-on).
+    pico_set_linker_script(picowallet
+        ${CMAKE_CURRENT_LIST_DIR}/m9/memmap_nonsecure.ld)
+    add_subdirectory(m9)
+    message(STATUS "M9: TrustZone-M dual-image build (picowallet + picowallet_secure)")
+else()
+    message(STATUS "M9: TrustZone-M split disabled (PICOWALLET_TRUSTZONE=OFF)")
+endif()

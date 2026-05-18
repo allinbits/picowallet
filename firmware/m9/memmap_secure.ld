@@ -184,6 +184,25 @@ SECTIONS
      * in the NS image; this script does not touch SCRATCH_X / SCRATCH_Y. */
     .stack_dummy (NOLOAD) : { KEEP(*(.stack*)) } > RAM
 
+    /* The SDK's crt0 unconditionally walks a data-copy table that
+     * includes __scratch_x_* / __scratch_y_*. Provide zero-sized
+     * sections so those symbols resolve and the copy loops are no-ops
+     * -- Secure doesn't use the scratch banks at all (no core1, no
+     * special .scratch_x / .scratch_y sections). */
+    .scratch_x : {
+        __scratch_x_start__ = .;
+        . = ALIGN(4);
+        __scratch_x_end__   = .;
+    } > FLASH
+    __scratch_x_source__ = LOADADDR(.scratch_x);
+
+    .scratch_y : {
+        __scratch_y_start__ = .;
+        . = ALIGN(4);
+        __scratch_y_end__   = .;
+    } > FLASH
+    __scratch_y_source__ = LOADADDR(.scratch_y);
+
     .flash_end : {
         KEEP(*(.embedded_end_block*))
         PROVIDE(__flash_binary_end = .);
