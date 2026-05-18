@@ -168,12 +168,23 @@ static void m9_sau_program(void) {
 // Per-peripheral registers run from offset 0x14 (ACCESSCTRL_ROM) through
 // 0xE4 (ACCESSCTRL_XIP_QMI). That's 0xD4 / 4 = 53 u32 entries.
 static void m9_accessctrl_open_for_ns(void) {
-    volatile uint32_t *r = (volatile uint32_t *)0x40060000u;  // ACCESSCTRL_BASE
-    const uint32_t PW   = 0xACCE0000u;
-    const uint32_t FULL = 0xFFu;                              // all flags set
+    volatile uint32_t *r    = (volatile uint32_t *)0x40060000u;  // BASE
+    volatile uint32_t *rset = (volatile uint32_t *)0x40062000u;  // SET alias
+    const uint32_t PW       = 0xACCE0000u;
 
+    // GPIO_NSMASK0/1 use all 32 bits for data so password can't fit at
+    // the base; use the SET alias (this path is documented to work for
+    // these registers and the SDK does it the same way).
+    rset[0x0C / 4u] = 0xFFFFFFFFu;
+    rset[0x10 / 4u] = 0xFF00FFFFu;
+
+    // Per-peripheral access registers from ROM (0x14) through XIP_QMI
+    // (0xE4). These have data in the bottom 8 bits + 0xACCE password
+    // in the top 16. The SET-alias path FAULTS on individual peripheral
+    // access regs (only GPIO_NSMASK0/1 support it), so write each one
+    // via the password mechanism.
     for (uint32_t off = 0x14u; off <= 0xE4u; off += 4u) {
-        r[off / 4u] = PW | FULL;
+        r[off / 4u] = PW | 0xFFu;
     }
     __asm__ volatile("dsb");
 }
@@ -286,8 +297,8 @@ static void m9_runtime_init_for_ns(void) {
 }
 
 int main(void) {
-    led_init();
     m9_runtime_init_for_ns();
+    led_init();
     m9_sau_program();
     m9_accessctrl_open_for_ns();
     m9_branch_to_nonsecure();
