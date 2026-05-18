@@ -2,6 +2,15 @@ cmake_minimum_required(VERSION 3.13)
 
 set(PICO_BOARD pico2 CACHE STRING "Board type")
 
+# M9: TrustZone-M split. When OFF (default), the firmware builds as a
+# single Secure-only image at 0x10000000 (the pre-M9 behavior). When
+# ON, the build will produce a dual-image UF2 (Secure stub at
+# 0x10000000 + Non-Secure image at 0x10080000); the dual-image plumbing
+# lands in M9 Phase 1b. See PLAN.md §M9 and firmware/m9/README.md.
+option(PICOWALLET_TRUSTZONE
+       "Build with the M9 TrustZone-M split (Phase 1+, requires hardware to validate)"
+       OFF)
+
 # Dependencies are git submodules under third_party/. Run:
 #   git submodule update --init --recursive
 # from the repo root after cloning.
