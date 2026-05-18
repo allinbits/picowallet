@@ -127,9 +127,16 @@ test: venv ## end-to-end gno handshake test (device must be in PrivVal mode)
 # Open an interactive REPL on the device's CDC serial port (TMKMS mode).
 # Probes for /dev/cu.usbmodem* (macOS) and /dev/ttyACM* (Linux).
 repl: ## open the TMKMS-mode REPL on the device's CDC port
-	@PORT=$$(ls /dev/cu.usbmodem* /dev/ttyACM* 2>/dev/null | head -1); \
+	@PORT=""; \
+	if command -v ioreg > /dev/null 2>&1; then \
+	    PORT=$$(ioreg -p IOService -l -w 0 -r -n PicoWallet -d 20 2>/dev/null \
+	            | awk -F'"' '/IOCalloutDevice.*\/dev\/cu/ {print $$4; exit}'); \
+	fi; \
 	if [ -z "$$PORT" ]; then \
-	    echo "No CDC port found. Is the device plugged in and in TMKMS mode?"; \
+	    PORT=$$(ls /dev/cu.usbmodem* /dev/ttyACM* 2>/dev/null | head -1); \
+	fi; \
+	if [ -z "$$PORT" ]; then \
+	    echo "No PicoWallet CDC port found. Is the device plugged in and in TMKMS mode?"; \
 	    exit 1; \
 	fi; \
 	echo "==> $$PORT  (Ctrl-A k then y to quit)"; \

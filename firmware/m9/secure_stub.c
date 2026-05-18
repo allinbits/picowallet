@@ -235,6 +235,21 @@ static void m9_branch_to_nonsecure(void) {
 // Order matches the SDK's runtime_init array order so the dependency
 // chain (resets before clocks, clocks before post-clock-resets) is
 // preserved.
+// Route every IRQ to the Non-Secure handler. ARMv8-M's NVIC has banked
+// targeting via NVIC_ITNS[0..15] (each bit = one IRQ); reset value is 0
+// = Secure-targeted. With Secure-only IRQs, NS code never gets timer
+// callbacks, never runs tud_task(), USB enumeration silently dies. For
+// Phase 1 we route everything to NS. Phase 4 will move TRNG / SHA /
+// flash-controller / button-GPIO IRQs back to Secure for the BOLOS-
+// style trusted-input path.
+static void m9_route_irqs_to_ns(void) {
+    volatile uint32_t *itns = (volatile uint32_t *)0xE000E380u;
+    for (int i = 0; i < 16; i++) {
+        itns[i] = 0xFFFFFFFFu;
+    }
+    __asm__ volatile("dsb");
+}
+
 // Open NS coprocessor access. RP2350 routes GPIO operations through CP0
 // (the gpioc coprocessor) and the RCP (CP7) is used by libgcc for
 // redundancy-checked branches. NSACR resets to 0 (NS denied for all
@@ -271,6 +286,7 @@ static void m9_runtime_init_for_ns(void) {
     runtime_init_boot_locks_reset();
     runtime_init_spin_locks_reset();
     m9_open_coprocessors_for_ns();
+    m9_route_irqs_to_ns();
 
     // bootrom_state_reset(GLOBAL_STATE) cleared the NS API permission
     // bitmap. The NS image's pico_unique_id constructor calls
