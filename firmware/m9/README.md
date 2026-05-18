@@ -39,6 +39,56 @@ handler point outside their expected regions), it calls
 -- no need to hold the button. The same recovery fires if a future
 NS-side flash gets interrupted mid-write.
 
+## LED diagnostics (Phase 1c)
+
+The secure stub uses the onboard LED as a side channel because there's
+no UART/USB/display available at that point.
+
+| What you see | What it means |
+|---|---|
+| LED never lights | bootrom rejected the .uf2 (run `picotool info` on it) OR `main()` faulted before LED init |
+| 1 long blink → BOOTSEL | NS vector table is `0xFFFFFFFF` (NS image not flashed) |
+| 2 long blinks → BOOTSEL | NS initial SP outside `0x20020000..0x20082000` |
+| 3 long blinks → BOOTSEL | NS reset handler outside `0x10080000..0x10400000` |
+| Long-on, off, long-on, off, long-on, off | Validation passed; BXNS to NS is the next instruction. Anything after this point is Non-Secure code |
+| After the 3-blink pattern, NS firmware boots normally | Phase 1 is working |
+| After the 3-blink pattern, LED stays off and nothing else happens | BXNS attempted but NS code faulted on its first instruction (likely ACCESSCTRL blocking some peripheral). Time for gdb. |
+
+## Debugging via the Pi debug probe
+
+Once `openocd` and `arm-none-eabi-gdb` are installed (`brew install openocd`
+on macOS), wire the probe's SWCLK/SWDIO/GND to the Pico 2's SWD pins and
+connect the probe over USB. Then:
+
+```
+# terminal 1 -- openocd on default ports (3333=gdb, 4444=telnet)
+openocd -f interface/cmsis-dap.cfg -c "adapter speed 5000" -f target/rp2350.cfg
+
+# terminal 2 -- attach to whatever the chip is doing now
+arm-none-eabi-gdb \
+    -ex "target extended-remote :3333" \
+    -ex "monitor halt" \
+    -ex "info reg pc lr msp psp control" \
+    firmware/build_m9/m9/picowallet_secure.elf
+```
+
+`info reg pc` is the most useful first line: where is the chip stuck?
+Cross-reference with `arm-none-eabi-objdump -d firmware/build_m9/m9/picowallet_secure.elf`
+(or the NS image's .elf) to find the line.
+
+Useful follow-ups inside gdb:
+  - `monitor mdw 0xe002ed28 1` -- read SCB_NS->CFSR (the NS-side fault
+    status register; non-zero bits say what kind of fault occurred).
+  - `monitor mdw 0xe000edfc 1` -- read DEMCR.
+  - `monitor mdw 0xe000ed24 1` -- read SHCSR (System Handler Control).
+  - `monitor mdw 0xe000ed28 1` -- read S-side CFSR.
+  - `monitor mdw 0xe000ed34 1` -- HFSR (hardfault).
+
+Picotool also works through the probe (no BOOTSEL needed):
+  - `picotool load -d firmware/build_m9/picowallet_m9.uf2` -- write flash via SWD
+  - `picotool save -d --range 0x10080000 0x10080020 dump.bin` -- read the NS vector table directly
+  - `picotool reboot -d` -- clean restart
+
 ## Memory layout (Phase 1)
 
 Flash (4 MB, base `0x10000000`):

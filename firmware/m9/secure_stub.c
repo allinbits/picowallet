@@ -133,12 +133,18 @@ static void m9_branch_to_nonsecure(void) {
         __builtin_unreachable();
     }
 
-    // Validation passed: LED solid on while we set up + BXNS, so the
-    // operator sees one steady blink rather than the count-and-recover
-    // pattern above. The LED stays on through BXNS; NS code can turn
-    // it off whenever it likes (e.g., the existing liveness blinker).
-    gpio_put(LED_PIN, 1);
-    busy_wait_long();
+    // Validation passed. Signal that with 3 distinct blinks so the
+    // operator can SEE the stub completed: if you count 3 blinks the
+    // secure stub reached BXNS; if you see something else (solid LED,
+    // 1-3 blinks then BOOTSEL, no LED at all) the failure is upstream.
+    // After the blinks we leave the LED OFF so any LED activity
+    // afterward is Non-Secure code, not us.
+    for (int i = 0; i < 3; i++) {
+        gpio_put(LED_PIN, 1);
+        busy_wait_long();
+        gpio_put(LED_PIN, 0);
+        busy_wait_long();
+    }
 
     // Set NS MSP. MSP_NS is the Non-Secure Main Stack Pointer alias;
     // only Secure code can write it. Requires -mcmse on the toolchain.
