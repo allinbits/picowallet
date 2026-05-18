@@ -26,6 +26,14 @@ MAGIC_START0   = 0x0A324655    # 'UF2\n'
 MAGIC_START1   = 0x9E5D5157
 MAGIC_END      = 0x0AB16F30
 
+# Pico 2 flash range. picotool tags blocks at the end of an idealized
+# 16-MB region (0x10ffff00) for metadata; those land outside our 4 MB
+# chip and we strip them in the merger to avoid both picotool's
+# overlap rejection and its family-ID confusion when two such trailer
+# blocks appear from two component UF2s.
+PICO2_FLASH_BASE = 0x10000000
+PICO2_FLASH_END  = 0x10400000   # exclusive
+
 
 def read_blocks(path):
     with open(path, "rb") as f:
@@ -56,6 +64,33 @@ def write_blocks(path, blocks):
             f.write(b)
 
 
+def filter_and_dedupe(blocks):
+    """Keep only blocks whose targetAddr falls inside the chip's actual
+    flash region (PICO2_FLASH_BASE..PICO2_FLASH_END), then drop any
+    block whose targetAddr was already claimed by an earlier block.
+
+    The out-of-range filter strips the embedded_end_block trailers that
+    picotool emits at 0x10ffff00 -- harmless in a single-image .uf2 but
+    a source of overlap errors + family-ID detection bugs when two
+    component images each carry one.
+    """
+    out = []
+    seen = set()
+    dropped_oor = 0
+    dropped_dup = 0
+    for b in blocks:
+        addr = struct.unpack_from("<I", b, 12)[0]
+        if addr < PICO2_FLASH_BASE or addr >= PICO2_FLASH_END:
+            dropped_oor += 1
+            continue
+        if addr in seen:
+            dropped_dup += 1
+            continue
+        seen.add(addr)
+        out.append(b)
+    return out, dropped_oor, dropped_dup
+
+
 def main():
     if len(sys.argv) < 4:
         print(__doc__, file=sys.stderr)
@@ -64,9 +99,14 @@ def main():
     blocks = []
     for inp in sys.argv[2:]:
         blocks.extend(read_blocks(inp))
+    blocks, dropped_oor, dropped_dup = filter_and_dedupe(blocks)
     write_blocks(out, blocks)
-    print(f"merged {len(blocks)} blocks "
-          f"({', '.join(sys.argv[2:])}) -> {out}")
+    msg = (f"merged {len(blocks)} blocks "
+           f"({', '.join(sys.argv[2:])}) -> {out}")
+    if dropped_oor or dropped_dup:
+        msg += (f" (stripped {dropped_oor} out-of-flash + "
+                f"{dropped_dup} duplicate block(s))")
+    print(msg)
 
 
 if __name__ == "__main__":
