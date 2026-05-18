@@ -220,6 +220,15 @@ hwm_state_t hwm_current(uint8_t slot_idx) {
     return s_slots[slot_idx].state;
 }
 
+uint64_t hwm_sign_count(uint8_t slot_idx) {
+    if (slot_idx >= HWM_TOTAL_SLOTS) return 0;
+    // next_seq counts the NEXT sign to be written; sign count is that minus
+    // the initial 1. Both wipe paths reset next_seq to 1, so a wiped slot
+    // correctly reports 0 signs.
+    uint64_t n = s_slots[slot_idx].next_seq;
+    return n > 0 ? n - 1 : 0;
+}
+
 // Map the raw cometbft/gno SignedMsgType to BFT step ordering. Within
 // a single (height, round) the consensus protocol signs in this order:
 // propose, then prevote, then precommit. The raw type values (Proposal

@@ -101,8 +101,9 @@ void host_protocol_print_help(void) {
     usb_cdc_printf("  gno.chain.remove <label>\r\n");
     usb_cdc_printf("  gno.chain.list\r\n");
     usb_cdc_printf("  chain.wipe                             erase all chain config slots\r\n");
-    usb_cdc_printf("  hwm.list                               show current HWM state per slot\r\n");
+    usb_cdc_printf("  hwm.list                               per-slot HWM state + sign count\r\n");
     usb_cdc_printf("  hwm.wipe                               erase all HWM state\r\n");
+    usb_cdc_printf("  metrics                                uptime, active slots, total signs\r\n");
     usb_cdc_printf("  factory_reset                          confirm-then-wipe chains + HWM\r\n");
     usb_cdc_printf("                                         (also: hold both buttons 5 s in TMKMS)\r\n");
     usb_cdc_printf("  help                                   show this message\r\n");
@@ -313,6 +314,34 @@ static int dispatch_os(const char *cmd, const char *args,
         snprintf(reply, reply_size, "cancelled");
         return -1;
     }
+    if (strcmp(cmd, "metrics") == 0) {
+        uint64_t total_signs = 0;
+        size_t   active_slots = 0;
+        for (int family = 0; family < 2; family++) {
+            chains_family_t fam = (family == 0)
+                ? CHAINS_FAMILY_COSMOS : CHAINS_FAMILY_GNO;
+            for (size_t i = 0; i < CHAINS_MAX_PER_FAMILY; i++) {
+                const chain_slot_t *s = chains_get(fam, i);
+                if (!s->in_use) continue;
+                active_slots++;
+                total_signs += hwm_sign_count(chains_hwm_slot_idx(fam, i));
+            }
+        }
+        uint32_t uptime_ms = to_ms_since_boot(get_absolute_time());
+        uint32_t up_s  = uptime_ms / 1000u;
+        uint32_t hh = up_s / 3600u;
+        uint32_t mm = (up_s % 3600u) / 60u;
+        uint32_t ss = up_s % 60u;
+        usb_cdc_printf("uptime:        %lu:%02lu:%02lu (%lu s)\r\n",
+                       (unsigned long)hh, (unsigned long)mm,
+                       (unsigned long)ss, (unsigned long)up_s);
+        usb_cdc_printf("mode:          %s\r\n", os_mode_name(os_current_mode));
+        usb_cdc_printf("active slots:  %zu\r\n", active_slots);
+        usb_cdc_printf("total signs:   %llu\r\n",
+                       (unsigned long long)total_signs);
+        snprintf(reply, reply_size, "metrics");
+        return 0;
+    }
     if (strcmp(cmd, "hwm.list") == 0) {
         // One line per in-use chain config slot, in the same order as
         // os.cosmos.chain.list + os.gno.chain.list.
@@ -335,14 +364,16 @@ static int dispatch_os(const char *cmd, const char *args,
                 const char *step =
                     ((unsigned)st.type < sizeof(step_name)/sizeof(step_name[0])
                      && step_name[st.type]) ? step_name[st.type] : "?";
+                uint64_t signs = hwm_sign_count(hi);
                 if (st.height == 0 && st.round == 0 && st.type == 0) {
                     usb_cdc_printf("  %-6s %-16s chain_id=%s (no signs yet)\r\n",
                                    fam_name, s->label, s->chain_id);
                 } else {
                     usb_cdc_printf("  %-6s %-16s chain_id=%s "
-                                   "h=%lld r=%d t=%s\r\n",
+                                   "h=%lld r=%d t=%s signs=%llu\r\n",
                                    fam_name, s->label, s->chain_id,
-                                   (long long)st.height, (int)st.round, step);
+                                   (long long)st.height, (int)st.round, step,
+                                   (unsigned long long)signs);
                 }
                 total++;
             }

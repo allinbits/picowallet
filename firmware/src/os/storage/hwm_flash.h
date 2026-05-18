@@ -57,6 +57,12 @@ bool hwm_advance(uint8_t slot_idx,
                  const char *chain_id, size_t chain_id_len,
                  int32_t type, int64_t height, int32_t round);
 
+// Number of signs ever persisted for `slot_idx` (across all boots).
+// Derived from the slot's seq counter -- next_seq=1 on a fresh slot
+// (count = 0); incremented by hwm_advance on each accepted sign.
+// Returns 0 for an out-of-range slot_idx.
+uint64_t hwm_sign_count(uint8_t slot_idx);
+
 // Erase one slot's region (16 sectors). Used when an operator reassigns a
 // chain config slot to a new chain_id, so the new chain starts fresh and
 // cannot inherit a higher-height block from a different chain.
