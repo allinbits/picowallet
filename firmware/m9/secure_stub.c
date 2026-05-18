@@ -24,12 +24,34 @@
 #include <stdint.h>
 
 #include "hardware/structs/sau.h"
+#include "pico/bootrom.h"
 
 #include "layout.h"
 
 // NS view of the System Control Block VTOR register. Set this before
 // BXNS so the core finds the NS image's vector table on entry.
 #define SCB_NS_VTOR_PTR  ((volatile uint32_t *)0xE002ED08u)
+
+// Validate the NS image's vector table before we jump into it. If the
+// NS image hasn't been flashed yet (the slot is erased: 0xFFFFFFFF) or
+// the pointers are nonsense, fault->lockup makes the device unflashable
+// without holding BOOTSEL on power-on. Instead we drop straight to USB
+// BOOTSEL so the operator can flash the NS image without re-cycling
+// the BOOTSEL button. Same goes for any future situation where the NS
+// image is corrupted -- we recover via re-flash rather than brick.
+static int ns_image_looks_valid(uint32_t ns_msp, uint32_t ns_reset) {
+    // Erased flash sentinel.
+    if (ns_msp == 0xFFFFFFFFu || ns_reset == 0xFFFFFFFFu) return 0;
+    // Initial SP must point into NS SRAM (incl. scratch banks).
+    if (ns_msp < M9_NONSECURE_SRAM_BASE
+        || ns_msp > (M9_SCRATCH_Y_BASE + M9_SCRATCH_Y_SIZE)) return 0;
+    // Reset handler must point into NS flash. Mask off the Thumb bit
+    // (set by the toolchain on all function pointers).
+    uint32_t entry = ns_reset & ~1u;
+    if (entry < M9_NONSECURE_FLASH_BASE
+        || entry >= (M9_FLASH_BASE + M9_FLASH_SIZE)) return 0;
+    return 1;
+}
 
 static void m9_sau_program(void) {
     // Disable SAU before reprogramming. Required by ARMv8-M to avoid
@@ -74,6 +96,14 @@ static void m9_branch_to_nonsecure(void) {
     uint32_t *ns_vt    = (uint32_t *)M9_NONSECURE_FLASH_BASE;
     uint32_t  ns_msp   = ns_vt[0];
     uint32_t  ns_reset = ns_vt[1];
+
+    if (!ns_image_looks_valid(ns_msp, ns_reset)) {
+        // NS image absent or corrupted. Don't BXNS into garbage --
+        // hand control back to the boot ROM's USB BOOTSEL flow so the
+        // operator can drop a fresh .uf2 in. reset_usb_boot is
+        // noreturn.
+        reset_usb_boot(0, 0);
+    }
 
     // Set NS MSP. MSP_NS is the Non-Secure Main Stack Pointer alias;
     // only Secure code can write it. Requires -mcmse on the toolchain.

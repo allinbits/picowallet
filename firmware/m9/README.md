@@ -7,18 +7,37 @@ existing single-image build is untouched while M9 lands phase by phase.
 
 Phases land as separate commits:
 
-  - **1a (this commit).** Memory layout + linker scripts. CMake option
-    `PICOWALLET_TRUSTZONE` registered but inactive; nothing in this
-    directory is wired into the build yet.
-  - **1b.** Secure stub (SAU + ACCESSCTRL configuration, BLXNS handoff
-    to the Non-Secure reset handler) + CMake glue that produces a
-    dual-image UF2 when `-DPICOWALLET_TRUSTZONE=ON`. Both ELFs link;
-    the device boots through Secure into Non-Secure with no behavior
-    change for the user.
+  - **1a.** Memory layout + linker scripts. CMake option
+    `PICOWALLET_TRUSTZONE` registered but inactive.
+  - **1b.** Secure stub (SAU configuration + BXNS handoff to the
+    Non-Secure reset handler) + dual-image build.
+  - **1b.1 (this commit).** Defensive Secure stub (re-enters USB
+    BOOTSEL if the NS image is missing or corrupted instead of
+    BXNS'ing into garbage) + a `merge_uf2.py` helper so `make
+    m9-build` produces a single combined `picowallet_m9.uf2`.
+  - **1c onward.** First-boot smoke test on hardware; iterate on
+    SAU boundaries and ACCESSCTRL defaults.
   - **2.x.** Migrate the keystore, signing, HWM writes, chain config
     writes, display, and button input into the Secure image; replace
     Non-Secure call sites with the veneer symbols declared in
     `firmware/src/os/secure_api.h`.
+
+## Flash workflow
+
+```
+make m9-build
+# Hold BOOTSEL while plugging in the Pico 2 → RPI-RP2 mounts.
+cp firmware/build_m9/picowallet_m9.uf2 /Volumes/RPI-RP2/
+# Device reboots; Secure stub runs, BXNS to NS, NS firmware comes up
+# as usual (splash, mode select, REPL or PrivVal).
+```
+
+If the Secure stub finds the NS slot empty or corrupted (vector
+table entries look like `0xFFFFFFFF`, or the initial SP / reset
+handler point outside their expected regions), it calls
+`reset_usb_boot(0, 0)` and the device re-enters BOOTSEL on its own
+-- no need to hold the button. The same recovery fires if a future
+NS-side flash gets interrupted mid-write.
 
 ## Memory layout (Phase 1)
 

@@ -25,6 +25,7 @@ target_link_options(picowallet_secure PRIVATE -mcmse)
 
 target_link_libraries(picowallet_secure
     pico_stdlib
+    pico_bootrom   # reset_usb_boot fallback when the NS slot is empty
 )
 
 pico_set_linker_script(picowallet_secure

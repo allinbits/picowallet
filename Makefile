@@ -27,12 +27,14 @@ build: submodules ## build firmware (default target)
 	@cmake --build $(BUILD_DIR) -j
 	@echo "==> $(UF2)"
 
-m9-build: submodules ## build the M9 TrustZone dual-image (Secure stub + NS image)
+M9_UF2_COMBINED := $(M9_BUILD_DIR)/picowallet_m9.uf2
+
+m9-build: submodules ## build the M9 TrustZone dual-image (Secure stub + NS image, merged)
 	@cmake -S firmware -B $(M9_BUILD_DIR) -DPICOWALLET_TRUSTZONE=ON -Wno-dev > /dev/null
 	@cmake --build $(M9_BUILD_DIR) -j
-	@echo "==> $(M9_UF2_S)"
-	@echo "==> $(M9_UF2_NS)"
-	@echo "    drag both .uf2 files (Secure first) to RPI-RP2 in BOOTSEL mode"
+	@python3 firmware/m9/merge_uf2.py $(M9_UF2_COMBINED) $(M9_UF2_S) $(M9_UF2_NS)
+	@echo "==> $(M9_UF2_COMBINED)"
+	@echo "    (drop just this single .uf2 onto RPI-RP2 in BOOTSEL mode)"
 
 clean: ## wipe firmware/build/
 	rm -rf $(BUILD_DIR)
