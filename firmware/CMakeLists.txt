@@ -126,6 +126,42 @@ if(PICOWALLET_TRUSTZONE)
     # (combining into one .uf2 is a follow-on).
     pico_set_linker_script(picowallet
         ${CMAKE_CURRENT_LIST_DIR}/m9/memmap_nonsecure.ld)
+    # NS-side init has to skip every pico-sdk runtime initializer that
+    # touches a Secure-only bootrom function. The RP2350 bootrom only
+    # exposes 8 ARM-NS APIs (get_sys_info, checked_flash_op,
+    # flash_runtime_to_storage_addr, get_partition_table_info,
+    # secure_call, otp_access, reboot, get_b_partition); anything else
+    # looked up from NS state returns 0 and crashes the NS image with a
+    # bx-to-0. BOOTROM_STATE_RESET is the immediate offender. We let the
+    # Secure stub do the bootrom-state reset before BXNS, and skip the
+    # NS-side initializers entirely.
+    target_compile_definitions(picowallet PRIVATE
+        # Bootrom-touching: the lookup table NS sees doesn't include these
+        # functions, so NS-side lookup returns 0 and crashes the image.
+        PICO_RUNTIME_NO_INIT_BOOTROM_RESET=1
+        PICO_RUNTIME_SKIP_INIT_BOOTROM_RESET=1
+        PICO_RUNTIME_NO_INIT_PER_CORE_BOOTROM_RESET=1
+        PICO_RUNTIME_SKIP_INIT_PER_CORE_BOOTROM_RESET=1
+        PICO_RUNTIME_SKIP_INIT_BOOTROM_LOCKING_ENABLE=1
+        # RESETS + clocks + power-down + spin-locks: ACCESSCTRL allows NS
+        # to touch these in Phase 1, but the spin loops in early_resets
+        # don't terminate from NS (the RESETS_DONE bits track operations
+        # the bootrom expected the Secure side to drive). Have the Secure
+        # stub call the same SDK functions before BXNS instead.
+        PICO_RUNTIME_SKIP_INIT_EARLY_RESETS=1
+        PICO_RUNTIME_SKIP_INIT_USB_POWER_DOWN=1
+        PICO_RUNTIME_SKIP_INIT_CLOCKS=1
+        PICO_RUNTIME_SKIP_INIT_POST_CLOCK_RESETS=1
+        PICO_RUNTIME_SKIP_INIT_SPIN_LOCKS_RESET=1
+        PICO_RUNTIME_SKIP_INIT_BOOT_LOCKS_RESET=1
+        # Coprocessors: NSACR resets with NS access to all coprocessors
+        # disabled. NS-side per_core_enable_coprocessors writes CPACR and
+        # then executes a coprocessor instruction (vmrs / vlstm pattern)
+        # which faults under NSACR=0. picowallet doesn't use FP/DSP in NS,
+        # so skip the whole step.
+        PICO_RUNTIME_NO_INIT_PER_CORE_ENABLE_COPROCESSORS=1
+        PICO_RUNTIME_SKIP_INIT_PER_CORE_ENABLE_COPROCESSORS=1
+    )
     add_subdirectory(m9)
     message(STATUS "M9: TrustZone-M dual-image build (picowallet + picowallet_secure)")
 else()

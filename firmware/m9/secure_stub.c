@@ -25,6 +25,7 @@
 
 #include "hardware/structs/sau.h"
 #include "pico/bootrom.h"
+#include "pico/runtime_init.h"
 #include "pico/stdlib.h"
 
 #include "layout.h"
@@ -124,6 +125,16 @@ static void m9_sau_program(void) {
     sau_hw->rbar = M9_SAU_R3_BASE;
     sau_hw->rlar = M9_SAU_R3_LIMIT | ((uint32_t)M9_SAU_R3_NSC << 1) | 1u;
 
+    // Region 4: Boot ROM (0x00000000-0x00007FFF). pico-sdk's NS-side
+    // runtime_init_bootrom_reset is the first runtime initializer and
+    // immediately reads the bootrom function table via `ldrh r3, [0, #22]`.
+    // Without this region the ROM read faults as SecureFault.AUVIOL and
+    // we land in the S hardfault handler before the NS image's main()
+    // ever runs.
+    sau_hw->rnr  = 4u;
+    sau_hw->rbar = M9_SAU_R4_BASE;
+    sau_hw->rlar = M9_SAU_R4_LIMIT | ((uint32_t)M9_SAU_R4_NSC << 1) | 1u;
+
     // Enable SAU. ALLNS=0 means anything outside the configured regions
     // stays Secure (matches the RP2350 IDAU default for flash + SRAM).
     sau_hw->ctrl = 1u;
@@ -209,8 +220,47 @@ static void m9_branch_to_nonsecure(void) {
     __builtin_unreachable();
 }
 
+// Hardware bring-up that pico-sdk's runtime_init normally does on the
+// SDK target. We run it here in Secure state because most of these
+// functions reach into bootrom and into peripherals whose RESETS_DONE
+// bits the bootrom only honors for Secure callers. The NS image has the
+// matching SDK initializers SKIP'd out via PICO_RUNTIME_SKIP_INIT_* in
+// firmware/CMakeLists.txt -- without those skips the NS image would try
+// to redo this work and either fault (bootrom_reset) or spin forever
+// (early_resets RESETS_DONE wait).
+//
+// Order matches the SDK's runtime_init array order so the dependency
+// chain (resets before clocks, clocks before post-clock-resets) is
+// preserved.
+static void m9_runtime_init_for_ns(void) {
+    rom_bootrom_state_reset(BOOTROM_STATE_RESET_GLOBAL_STATE
+                          | BOOTROM_STATE_RESET_CURRENT_CORE);
+    runtime_init_early_resets();
+    runtime_init_usb_power_down();
+    runtime_init_clocks();
+    runtime_init_post_clock_resets();
+    runtime_init_boot_locks_reset();
+    runtime_init_spin_locks_reset();
+
+    // bootrom_state_reset(GLOBAL_STATE) cleared the NS API permission
+    // bitmap. The NS image's pico_unique_id constructor calls
+    // GET_SYS_INFO via rom_func_lookup, so we have to re-enable that
+    // permission (and a few other NS-callable APIs we expect to use
+    // later) before BXNS. Phase 4 of the M9 plan will lock these back
+    // down to only the APIs we actually need.
+    rom_set_ns_api_permission(BOOTROM_NS_API_get_sys_info, true);
+    rom_set_ns_api_permission(BOOTROM_NS_API_checked_flash_op, true);
+    rom_set_ns_api_permission(BOOTROM_NS_API_flash_runtime_to_storage_addr, true);
+    rom_set_ns_api_permission(BOOTROM_NS_API_get_partition_table_info, true);
+    rom_set_ns_api_permission(BOOTROM_NS_API_secure_call, true);
+    rom_set_ns_api_permission(BOOTROM_NS_API_otp_access, true);
+    rom_set_ns_api_permission(BOOTROM_NS_API_reboot, true);
+    rom_set_ns_api_permission(BOOTROM_NS_API_get_b_partition, true);
+}
+
 int main(void) {
     led_init();
+    m9_runtime_init_for_ns();
     m9_sau_program();
     m9_accessctrl_open_for_ns();
     m9_branch_to_nonsecure();

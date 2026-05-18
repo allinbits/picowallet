@@ -62,7 +62,7 @@
 #define M9_SAU_LIMIT(base, size)   (((base) + (size) - 1u) & ~0x1Fu)
 
 // Region attribute encoding shorthand (matches PLAN.md §M9.1 table).
-#define M9_SAU_REGION_COUNT        4
+#define M9_SAU_REGION_COUNT        5
 
 // Region 0: NSC veneer (Secure, callable from Non-Secure).
 #define M9_SAU_R0_BASE             M9_NSC_BASE
@@ -96,3 +96,14 @@
 #define M9_SAU_R3_BASE             0x40000000u
 #define M9_SAU_R3_LIMIT            ((0xE0000000u - 1u) & ~0x1Fu)
 #define M9_SAU_R3_NSC              0
+
+// Region 4: Boot ROM (0x00000000-0x00007FFF). Required for NS access to
+// the bootrom function table at 0x14/0x16 + bootrom NS-callable entry
+// points. pico-sdk's runtime_init_bootrom_reset is the first NS-side
+// initializer and immediately reads the ROM table; without this region
+// the read faults as SecureFault.AUVIOL.
+#define M9_BOOTROM_BASE            0x00000000u
+#define M9_BOOTROM_SIZE            0x00008000u
+#define M9_SAU_R4_BASE             M9_BOOTROM_BASE
+#define M9_SAU_R4_LIMIT            M9_SAU_LIMIT(M9_BOOTROM_BASE, M9_BOOTROM_SIZE)
+#define M9_SAU_R4_NSC              0

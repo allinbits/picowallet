@@ -458,24 +458,102 @@ is built from scratch on top of those primitives.
   `os_crypto_*`. (Done: only `bench.c` calls `crypto_ed25519_*`
   directly with a local seed, which is fine.) Lock down the veneer
   ABI above as the M9 contract.
-- **Phase 1 — Linker + memory layout.** Carve flash into S / NSC / NS
-  regions; carve SRAM the same way. Boot lands in Secure; Secure
-  configures SAU + IDAU + ACCESSCTRL, then `BLXNS` to the NS entry
-  point.
-- **Phase 2 — Veneer entries.** Write the functions in §M9.2 as
+
+- **Phase 1 — Secure-owned bring-up + minimal NS runtime.**
+  pico-sdk 2.2.0 is built around a single-image, mostly-Secure runtime
+  model. The first hardware bring-up attempt revealed that running the
+  SDK's NS-side `runtime_init` from NS state faults on multiple fronts
+  — bootrom function lookups for Secure-only APIs return 0 and crash
+  the NS image on `bx 0`, `early_resets` spin loops never terminate
+  because `RESETS_DONE` is bootrom-gated, `per_core_enable_coprocessors`
+  faults because `NSACR` resets to "no coprocessor access for NS",
+  and `pico_unique_id`'s `__attribute__((constructor))` calls
+  `GET_SYS_INFO` which the bootrom rejects for NS callers in unclear
+  conditions. Each of these is a separate fix in pico-sdk itself.
+
+  Rather than paper over every SDK assumption from NS, **the Secure
+  stub owns every interaction with hardware and the bootrom**. NS is
+  reduced to a hand-rolled minimal C runtime that does not call
+  `runtime_init` and runs no `.init_array` entry that depends on
+  bootrom state.
+
+  - **Phase 1a — Memory layout + linker scripts.** *(landed.)*
+    `firmware/m9/layout.h` + `memmap_secure.ld` + `memmap_nonsecure.ld`.
+    Secure at `0x10000000`, NSC veneer page at `0x1007F000`, NS at
+    `0x10080000`, chains config + HWM at the top of flash. SRAM split
+    by half: Secure `0x20000000–0x2001FFFF`, NS `0x20020000–0x20081FFF`
+    (includes scratch_x/y).
+  - **Phase 1b — Secure stub: SAU + ACCESSCTRL + BXNS.** *(landed.)*
+    SAU regions R0–R4: NSC veneer, NS flash, NS SRAM, NS peripherals,
+    boot ROM. ACCESSCTRL fully open to NS in Phase 1 (locked down in
+    Phase 4). LED diagnostic blink pattern; defensive drop to BOOTSEL
+    if the NS slot's vector table is empty or corrupted.
+  - **Phase 1c — Secure-side hardware bring-up.** *(landed.)*
+    The Secure stub calls, in order, before BXNS:
+    1. `rom_bootrom_state_reset(GLOBAL_STATE | CURRENT_CORE)`
+    2. `runtime_init_early_resets()`
+    3. `runtime_init_usb_power_down()`
+    4. `runtime_init_clocks()`
+    5. `runtime_init_post_clock_resets()`
+    6. `runtime_init_boot_locks_reset()`
+    7. `runtime_init_spin_locks_reset()`
+    8. `rom_set_ns_api_permission(...)` for each of the 8 NS-callable
+       bootrom APIs (re-granted because `bootrom_state_reset` clears
+       them).
+
+    The corresponding NS-side `PICO_RUNTIME_SKIP_INIT_*` defines are
+    set in `firmware/CMakeLists.txt` so the SDK's runtime_init table
+    is mostly empty by the time NS runs.
+  - **Phase 1d — Minimal NS crt0.** *(open.)* Replace pico-sdk's
+    `_reset_handler` + `platform_entry` for the NS image with a custom
+    crt0 in `firmware/m9/` that:
+      - Places the NS vector table at `0x10080000`.
+      - On reset: copies `.data` from flash to RAM, zeros `.bss`,
+        jumps to `main`.
+      - Does **not** call `runtime_init`.
+      - Does **not** execute the SDK's `.init_array` entries that
+        depend on bootrom state — specifically
+        `_retrieve_unique_id_on_boot` from `pico_unique_id`.
+        Either (a) exclude `pico_unique_id` from the NS link and
+        provide an `s_get_chip_id()` veneer that the NS code can call
+        in main if it needs the chip ID, or (b) vendor a patched
+        `unique_id.c` into `firmware/src/` whose constructor is a
+        no-op (the real lookup moves to Phase 2's veneer).
+      - Sets NS VTOR to `0x10080000` (already done by the Secure stub
+        in 1b, but the NS crt0 owns it from this point).
+
+    For absolute-minimum smoke test: NS `main()` lights the LED,
+    polls a button, halts. No USB, no display, no WiFi. Subsequent
+    Phase-1 work reintroduces subsystems one at a time, each guarded
+    by "does it still need a bootrom call that NS doesn't have access
+    to" review.
+
+  - **Phase 1e — Smoke test + recovery escape hatch.** Boot on
+    hardware, observe blink pattern, confirm NS reaches main, exercise
+    the BOOTSEL recovery path (corrupted NS slot → Secure stub re-
+    enters BOOTSEL automatically). Document the LED blink table in
+    `firmware/m9/README.md`.
+
+- **Phase 2 — NSC veneer entries.** Write the functions in §M9.2 as
   `cmse_nonsecure_entry` symbols in the Secure image. Validate every
   NS-supplied pointer on entry with `cmse_check_pointed_object`.
-  Refuse if any output buffer overlaps Secure memory.
-- **Phase 3 — Build system.** Split CMake into two link steps + a
-  final UF2 packaging step that places both images in flash at the
-  right offsets.
-- **Phase 4 — ACCESSCTRL + DMA attribution.** Per the boundary table:
-  flash, display SPI, button GPIO, TRNG, SHA peripheral all Secure;
-  USB + remaining peripherals NS. DMA channels attributed per-master
-  so an NS-initiated DMA cannot read Secure memory.
+  Refuse if any output buffer overlaps Secure memory. Start with
+  `s_get_chip_id` + `s_random` (the two things NS needs immediately),
+  then `s_console_render_lines` + `s_input_pressed` once Phase 1d's
+  smoke test is green and we want a real splash + mode-select.
+- **Phase 3 — Build system polish.** *(mostly landed in Phase 1a–1c.)*
+  Two-ELF build, `merge_uf2.py` packaging, debug-probe flashing path,
+  Makefile targets for `m9-build` / `m9-attach` / `m9-flash-probe`.
+- **Phase 4 — ACCESSCTRL + DMA + NSACR lock-down.** Per the boundary
+  table: flash, display SPI, button GPIO, TRNG, SHA peripheral all
+  Secure; USB + remaining peripherals NS. DMA channels attributed
+  per-master so an NS-initiated DMA cannot read Secure memory. Narrow
+  the NS API permission bitmap to the actual set the NS image calls
+  through (likely just `reboot` + maybe `otp_access` for chip-ID).
 - **Phase 5 — TinyUSB + lwIP audit.** Confirm DMA descriptors / pbuf
   pools / network buffers live entirely in NS memory. Refactor any
-  shared-memory assumptions.
+  shared-memory assumptions. Re-enable NS subsystems one at a time
+  on top of the Phase-1 crt0.
 - **Phase 6 — End-to-end revalidation.** `make test` + both testnet
   scripts pass. Add a negative test: NS deliberately dereferencing the
   seed VA hard-faults instead of returning bytes.
@@ -485,6 +563,34 @@ is built from scratch on top of those primitives.
 - **`bench.c`** uses Monocypher's Ed25519 directly with a local test
   seed; it ends up in NS using the NS copy of Monocypher. No change
   needed (it never touched the real keystore).
+- **pico-sdk runtime_init is essentially Secure-only.** Found during
+  Phase 1c bring-up. Several initializers — `bootrom_reset`,
+  `per_core_bootrom_reset`, `bootrom_locking_enable`, `early_resets`,
+  `usb_power_down`, `clocks`, `post_clock_resets`, `boot_locks_reset`,
+  `spin_locks_reset`, `per_core_enable_coprocessors` — must run from
+  Secure state. Phase 1c moves all of these into the Secure stub and
+  uses `PICO_RUNTIME_SKIP_INIT_*` to suppress the NS-side
+  registrations. Any future pico-sdk upgrade has to be re-audited
+  for new bootrom-touching initializers.
+- **Bootrom NS API surface is narrow.** Only 8 bootrom APIs are
+  exposed to NS: `get_sys_info`, `checked_flash_op`,
+  `flash_runtime_to_storage_addr`, `get_partition_table_info`,
+  `secure_call`, `otp_access`, `reboot`, `get_b_partition`. Any other
+  ROM function looked up from NS returns 0 and the SDK then does
+  `bx 0` and faults. Also: `rom_bootrom_state_reset(GLOBAL_STATE)`
+  clears the NS permission bitmap; the Secure stub re-grants whatever
+  NS needs before BXNS.
+- **`__attribute__((constructor))` in SDK modules is dangerous from
+  NS.** `pico_unique_id`'s `_retrieve_unique_id_on_boot` constructor
+  calls bootrom `GET_SYS_INFO` which faults even with NS permission
+  granted (the bootrom's NS variant of `get_sys_info` has additional
+  buffer-attribution checks we haven't fully chased). Phase 1d
+  excludes or stubs out the offending module rather than calling the
+  pico-sdk runtime path that registers it.
+- **NSACR resets with NS coprocessor access disabled.** If Phase 2+
+  decides NS needs FPU (Cortex-M33 has it), the Secure stub must set
+  `SCB->NSACR` bits 10 + 11 before BXNS, and the NS crt0 (or first
+  initializer) must set `CPACR_NS`.
 - **TRNG access from NS.** SC handshake needs ephemerals. Options:
   (a) `s_random` veneer — every random byte is a cross-world call;
   acceptable since handshakes are infrequent;
@@ -494,8 +600,10 @@ is built from scratch on top of those primitives.
 - **Memory cost.** ~5-10 KB of duplicated Monocypher in NS; trivial.
 - **Build complexity.** Two ELFs, dual link, UF2 packaging. Manual.
 - **First-time bringup risk.** SAU misconfiguration = brick.
-  Development build should preserve an "escape hatch" that disables
-  the split.
+  Development build preserves an "escape hatch": the Secure stub's
+  NS-image validation step drops to BOOTSEL via `reset_usb_boot(0,0)`
+  if the NS vector table looks empty or corrupted, so a bad NS flash
+  doesn't require holding BOOTSEL to recover.
 - **Mode select at boot.** Currently NS-driven. After M9 it moves to
   Secure (Secure decides whether to launch the admin REPL path or the
   PrivVal path before transferring control), since the choice gates
