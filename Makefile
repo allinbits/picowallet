@@ -49,17 +49,21 @@ m9-openocd: ## start openocd for the Pi debug probe (foreground; ctrl-C to stop)
 
 # Attach gdb to a running chip via SWD. Run `make m9-openocd` in a
 # separate terminal first. Halts the CPU, dumps PC/LR/SP and the S- and
-# NS-side fault status registers, then drops to the gdb prompt.
+# NS-side fault status registers (including SFSR / SFAR for the
+# SecureFault path, which CFSR doesn't carry on Cortex-M33).
 m9-attach: ## attach gdb to the secure stub via probe (needs `make m9-openocd`)
 	arm-none-eabi-gdb \
 	    -ex "target extended-remote :3333" \
 	    -ex "monitor halt" \
 	    -ex "info reg pc lr msp psp control" \
-	    -ex "printf \"--- S-side fault regs ---\\n\"" \
+	    -ex "printf \"--- S-side CFSR/HFSR/BFAR ---\\n\"" \
 	    -ex "monitor mdw 0xe000ed28 1" \
 	    -ex "monitor mdw 0xe000ed2c 1" \
 	    -ex "monitor mdw 0xe000ed38 1" \
-	    -ex "printf \"--- NS-side fault regs ---\\n\"" \
+	    -ex "printf \"--- S-side SFSR/SFAR (SecureFault) ---\\n\"" \
+	    -ex "monitor mdw 0xe000ede4 1" \
+	    -ex "monitor mdw 0xe000ede8 1" \
+	    -ex "printf \"--- NS-side CFSR/HFSR/BFAR ---\\n\"" \
 	    -ex "monitor mdw 0xe002ed28 1" \
 	    -ex "monitor mdw 0xe002ed2c 1" \
 	    -ex "monitor mdw 0xe002ed38 1" \

@@ -62,7 +62,7 @@
 #define M9_SAU_LIMIT(base, size)   (((base) + (size) - 1u) & ~0x1Fu)
 
 // Region attribute encoding shorthand (matches PLAN.md §M9.1 table).
-#define M9_SAU_REGION_COUNT        3
+#define M9_SAU_REGION_COUNT        4
 
 // Region 0: NSC veneer (Secure, callable from Non-Secure).
 #define M9_SAU_R0_BASE             M9_NSC_BASE
@@ -82,3 +82,17 @@
                                        (M9_SCRATCH_Y_BASE + M9_SCRATCH_Y_SIZE) \
                                        - M9_NONSECURE_SRAM_BASE)
 #define M9_SAU_R2_NSC              0
+
+// Region 3: peripheral + SIO space, NS-attributed at the SAU level.
+// Covers 0x40000000-0xDFFFFFFF (APB/AHB peripherals through SIO and its
+// mirror). The SCS at 0xE0000000-0xE00FFFFF is excluded because the
+// Cortex-M33 banks it automatically (NS access to 0xE000Exxx is
+// auto-redirected to 0xE002Exxx -- no SAU entry needed).
+//
+// ACCESSCTRL adds the second layer: TRNG / SHA / flash controller stay
+// Secure-Privileged-only per their default ACCESSCTRL masks. SAU just
+// opens the bus for NS to attempt access; ACCESSCTRL decides whether
+// the attempt succeeds.
+#define M9_SAU_R3_BASE             0x40000000u
+#define M9_SAU_R3_LIMIT            ((0xE0000000u - 1u) & ~0x1Fu)
+#define M9_SAU_R3_NSC              0

@@ -115,6 +115,15 @@ static void m9_sau_program(void) {
     sau_hw->rbar = M9_SAU_R2_BASE;
     sau_hw->rlar = M9_SAU_R2_LIMIT | ((uint32_t)M9_SAU_R2_NSC << 1) | 1u;
 
+    // Region 3: peripheral + SIO space (0x40000000-0xDFFFFFFF). Without
+    // this, NS code's very first instructions -- which read SIO_CPUID
+    // at 0xD0000000 to check core0/core1 -- fault as SecureFault.AUVIOL
+    // and double-fault the M33 into lockup before the NS image runs at
+    // all.
+    sau_hw->rnr  = 3u;
+    sau_hw->rbar = M9_SAU_R3_BASE;
+    sau_hw->rlar = M9_SAU_R3_LIMIT | ((uint32_t)M9_SAU_R3_NSC << 1) | 1u;
+
     // Enable SAU. ALLNS=0 means anything outside the configured regions
     // stays Secure (matches the RP2350 IDAU default for flash + SRAM).
     sau_hw->ctrl = 1u;
