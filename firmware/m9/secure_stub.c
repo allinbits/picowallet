@@ -130,6 +130,43 @@ static void m9_sau_program(void) {
     __asm__ volatile("dsb; isb");
 }
 
+// ---- ACCESSCTRL --------------------------------------------------------
+//
+// SAU is the first gate (memory attribution). ACCESSCTRL is the second:
+// per-peripheral attribution by master + security + privilege. Most
+// peripherals come out of reset as "Secure-Privileged-only" -- the
+// notable ones for our boot path are XIP_CTRL and XIP_QMI (pico-sdk's
+// crt0 runs boot2, which touches the QSPI controller registers), plus
+// the broader RESETS / CLOCKS / PLL / XOSC / IO_BANK / PADS_BANK
+// peripherals that runtime_init walks.
+//
+// For Phase 1 we open ALL the per-peripheral access registers to
+// Non-Secure (both NSP and NSU) so the NS image's runtime_init + SDK
+// init can run. Phase 4 hardens this by closing TRNG / SHA / RESETS /
+// flash controller back down to Secure-only for the real M9 boundary.
+//
+// Each per-peripheral register is at ACCESSCTRL_BASE + offset, with:
+//   bits [7:0]  : access flags (DBG/DMA/CORE1/CORE0/SP/SU/NSP/NSU)
+//   bits [31:16]: must contain the password 0xACCE for the write to land
+//
+// The first three words (LOCK / FORCE_CORE_NS / CFGRESET) and the next
+// two 32-bit GPIO_NSMASK registers have different layouts; we skip them
+// here -- early NS code doesn't touch GPIO PADs, and we explicitly do
+// not want to touch LOCK by accident.
+//
+// Per-peripheral registers run from offset 0x14 (ACCESSCTRL_ROM) through
+// 0xE4 (ACCESSCTRL_XIP_QMI). That's 0xD4 / 4 = 53 u32 entries.
+static void m9_accessctrl_open_for_ns(void) {
+    volatile uint32_t *r = (volatile uint32_t *)0x40060000u;  // ACCESSCTRL_BASE
+    const uint32_t PW   = 0xACCE0000u;
+    const uint32_t FULL = 0xFFu;                              // all flags set
+
+    for (uint32_t off = 0x14u; off <= 0xE4u; off += 4u) {
+        r[off / 4u] = PW | FULL;
+    }
+    __asm__ volatile("dsb");
+}
+
 __attribute__((noreturn))
 static void m9_branch_to_nonsecure(void) {
     uint32_t *ns_vt    = (uint32_t *)M9_NONSECURE_FLASH_BASE;
@@ -142,13 +179,12 @@ static void m9_branch_to_nonsecure(void) {
         __builtin_unreachable();
     }
 
-    // Validation passed. Signal that with 3 distinct blinks so the
-    // operator can SEE the stub completed: if you count 3 blinks the
-    // secure stub reached BXNS; if you see something else (solid LED,
-    // 1-3 blinks then BOOTSEL, no LED at all) the failure is upstream.
-    // After the blinks we leave the LED OFF so any LED activity
-    // afterward is Non-Secure code, not us.
-    for (int i = 0; i < 3; i++) {
+    // Validation passed. Signal that with 5 distinct blinks (was 3 in
+    // 1c.2 / 1c.4 -- the bump is a re-flash witness so we know we're
+    // running THIS build, not the previous one). After the blinks we
+    // leave the LED OFF so any LED activity afterward is Non-Secure
+    // code, not us.
+    for (int i = 0; i < 5; i++) {
         gpio_put(LED_PIN, 1);
         busy_wait_long();
         gpio_put(LED_PIN, 0);
@@ -175,12 +211,8 @@ static void m9_branch_to_nonsecure(void) {
 
 int main(void) {
     led_init();
-    // ACCESSCTRL configuration deferred to Phase 4. The reset defaults
-    // (after the boot ROM's setup) let Core0 in NS state reach the
-    // USB / GPIO / SPI peripherals the existing firmware uses. TRNG
-    // and SHA stay Secure-only -- NS will get those via veneers in
-    // Phase 2.x.
     m9_sau_program();
+    m9_accessctrl_open_for_ns();
     m9_branch_to_nonsecure();
     __builtin_unreachable();
 }
