@@ -66,8 +66,16 @@ SECTIONS
 
         . = ALIGN(4);
         PROVIDE_HIDDEN (__init_array_start = .);
-        KEEP(*(SORT(.init_array.*)))
-        KEEP(*(.init_array))
+        /* Phase 1d (M9): drop __init_array entries entirely. pico-sdk's
+         * pico_unique_id registers _retrieve_unique_id_on_boot here via
+         * __attribute__((constructor)); from NS state that constructor
+         * crashes when calling bootrom GET_SYS_INFO. pico-sdk's
+         * newlib_interface.c's runtime_init still walks
+         * __init_array_start..end but the range is now empty so the loop
+         * body never runs. frame_dummy (libgcc stack-unwinding
+         * registration) is also dropped, which is fine because picowallet
+         * has no C++ exceptions / unwinding. Re-introduce on a case-by-
+         * case basis once the matching Secure-side machinery exists. */
         PROVIDE_HIDDEN (__init_array_end = .);
 
         . = ALIGN(4);

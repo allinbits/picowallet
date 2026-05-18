@@ -232,6 +232,32 @@ static void m9_branch_to_nonsecure(void) {
 // Order matches the SDK's runtime_init array order so the dependency
 // chain (resets before clocks, clocks before post-clock-resets) is
 // preserved.
+// Open NS coprocessor access. RP2350 routes GPIO operations through CP0
+// (the gpioc coprocessor) and the RCP (CP7) is used by libgcc for
+// redundancy-checked branches. NSACR resets to 0 (NS denied for all
+// coprocessors); leaving it that way means NS's first gpio_init() / any
+// gpioc instruction faults as a UsageFault.NOCP. Open everything NS-
+// callable: CP0+CP1 (gpio), CP4+CP7 (RCP), CP10+CP11 (FPU, just in case
+// future NS code uses floats).
+//
+// Then mirror those into CPACR_NS so NS can actually issue the
+// instructions without first having to write to its own CPACR.
+#define SCB_S_NSACR    (*(volatile uint32_t *)0xE000ED8Cu)
+#define SCB_S_CPACR    (*(volatile uint32_t *)0xE000ED88u)
+#define SCB_NS_CPACR   (*(volatile uint32_t *)0xE002ED88u)
+static void m9_open_coprocessors_for_ns(void) {
+    SCB_S_NSACR  |= (1u << 11) | (1u << 10)
+                  | (1u << 7)  | (1u << 4)
+                  | (1u << 1)  | (1u << 0);
+    // CPACR layout: each CP has a 2-bit field. 0b11 = full access for
+    // priv + unpriv. Mask covers CP0+CP1+CP4+CP7+CP10+CP11.
+    const uint32_t mask = (3u << 0)  | (3u << 2)  | (3u << 8)
+                        | (3u << 14) | (3u << 20) | (3u << 22);
+    SCB_S_CPACR  |= mask;
+    SCB_NS_CPACR |= mask;
+    __asm__ volatile("dsb; isb");
+}
+
 static void m9_runtime_init_for_ns(void) {
     rom_bootrom_state_reset(BOOTROM_STATE_RESET_GLOBAL_STATE
                           | BOOTROM_STATE_RESET_CURRENT_CORE);
@@ -241,6 +267,7 @@ static void m9_runtime_init_for_ns(void) {
     runtime_init_post_clock_resets();
     runtime_init_boot_locks_reset();
     runtime_init_spin_locks_reset();
+    m9_open_coprocessors_for_ns();
 
     // bootrom_state_reset(GLOBAL_STATE) cleared the NS API permission
     // bitmap. The NS image's pico_unique_id constructor calls

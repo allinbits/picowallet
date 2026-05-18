@@ -329,7 +329,7 @@ chain B.
   regardless of how many other chains are configured (real flash 2-5×
   → 20-45y in practice).
 
-### ◯ M9 — TrustZone-M split (Ledger-style)
+### ◐ M9 — TrustZone-M split (Ledger-style)
 
 Goal: hold the seed, all destructive state mutations, and the
 user-consent path (display + buttons) in the Secure world so a full
@@ -504,34 +504,34 @@ is built from scratch on top of those primitives.
     The corresponding NS-side `PICO_RUNTIME_SKIP_INIT_*` defines are
     set in `firmware/CMakeLists.txt` so the SDK's runtime_init table
     is mostly empty by the time NS runs.
-  - **Phase 1d — Minimal NS crt0.** *(open.)* Replace pico-sdk's
-    `_reset_handler` + `platform_entry` for the NS image with a custom
-    crt0 in `firmware/m9/` that:
-      - Places the NS vector table at `0x10080000`.
-      - On reset: copies `.data` from flash to RAM, zeros `.bss`,
-        jumps to `main`.
-      - Does **not** call `runtime_init`.
-      - Does **not** execute the SDK's `.init_array` entries that
-        depend on bootrom state — specifically
-        `_retrieve_unique_id_on_boot` from `pico_unique_id`.
-        Either (a) exclude `pico_unique_id` from the NS link and
-        provide an `s_get_chip_id()` veneer that the NS code can call
-        in main if it needs the chip ID, or (b) vendor a patched
-        `unique_id.c` into `firmware/src/` whose constructor is a
-        no-op (the real lookup moves to Phase 2's veneer).
-      - Sets NS VTOR to `0x10080000` (already done by the Secure stub
-        in 1b, but the NS crt0 owns it from this point).
+  - **Phase 1d — Strip NS-side bring-up to what actually works.**
+    *(landed.)* Two changes turned out to be enough; we did **not**
+    need to vendor pico-sdk's crt0:
+      - `firmware/m9/memmap_nonsecure.ld` makes `__init_array_end =
+        __init_array_start`. pico-sdk's `newlib_interface.c`
+        `runtime_init` still iterates that range, but with the range
+        empty the offending `_retrieve_unique_id_on_boot` constructor
+        (which lives in `.init_array.01000`) is never reached.
+        Side effect: `frame_dummy` (libgcc unwind registration) is
+        also dropped, which is fine — picowallet uses no C++ exceptions.
+      - `m9_open_coprocessors_for_ns()` in the Secure stub sets
+        `NSACR` bits + `CPACR_NS` so NS can issue coprocessor
+        instructions. RP2350's `gpio_set_dir` / `gpio_put` go through
+        the `gpioc` coprocessor (CP0), and libgcc's redundancy-checked
+        branches use CP4/CP7; without this NS faults on the very first
+        `gpio_init`.
 
-    For absolute-minimum smoke test: NS `main()` lights the LED,
-    polls a button, halts. No USB, no display, no WiFi. Subsequent
-    Phase-1 work reintroduces subsystems one at a time, each guarded
-    by "does it still need a bootrom call that NS doesn't have access
-    to" review.
+    NS now reaches `main()`, runs the splash, enters
+    `mode_select_prompt()`, and idles in `input_wait_press` waiting
+    for a button. Validated on the Pi Debug Probe with `make m9-attach`.
 
-  - **Phase 1e — Smoke test + recovery escape hatch.** Boot on
-    hardware, observe blink pattern, confirm NS reaches main, exercise
-    the BOOTSEL recovery path (corrupted NS slot → Secure stub re-
-    enters BOOTSEL automatically). Document the LED blink table in
+  - **Phase 1e — Smoke test + recovery escape hatch.** *(landed.)*
+    Boot on hardware verified end-to-end: bootrom → Secure stub
+    (SAU + ACCESSCTRL + bootrom-state-reset + hardware bring-up +
+    NSACR/CPACR_NS + LED blink × 5 + BXNS) → NS reset handler →
+    `main()` → splash → mode-select. The BOOTSEL recovery path
+    (Secure stub bounces to `reset_usb_boot(0,0)` on bad NS slot)
+    remains in place. LED diagnostic table documented in
     `firmware/m9/README.md`.
 
 - **Phase 2 — NSC veneer entries.** Write the functions in §M9.2 as
