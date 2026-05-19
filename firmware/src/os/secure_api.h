@@ -61,16 +61,6 @@ int s_get_pubkey(uint8_t curve, const char *path, uint8_t out_pubkey[32]);
 int s_sign_sc_challenge(uint8_t curve, const char *path,
                         const uint8_t challenge[32], uint8_t out_sig[64]);
 
-// Phase 2c transitional: variable-length privval sign without HWM
-// fusion. Curve is hardcoded to Ed25519 (the only privval curve the
-// device supports). This veneer IS a generic signing oracle and
-// loses the HWM strict-advance guarantee that the M9.2 design
-// requires. Phase 2c3 replaces it with s_sign_and_advance, which
-// takes the HWM slot + (type, height, round) and refuses to sign
-// anything that doesn't strict-advance.
-int s_sign_privval(const char *path, const uint8_t *data, size_t data_len,
-                   uint8_t out_sig[64]);
-
 // Atomically: validate that (type, height, round) strictly advances
 // the HWM at slot `hwm_slot_idx`; append a new HWM record; sign
 // `data` (canonical sign-bytes) with the slot's key; return signature.

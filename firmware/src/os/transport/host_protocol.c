@@ -92,7 +92,9 @@ void host_protocol_print_help(void) {
     usb_cdc_printf("  led on|off                             LED control\r\n");
     usb_cdc_printf("  btn                                    read button state\r\n");
     usb_cdc_printf("  pubkey <curve> [<path>]                derive pubkey (curve: ed25519|secp256k1; path defaults to m)\r\n");
+#if !PICOWALLET_TRUSTZONE
     usb_cdc_printf("  sign <curve> <path> <hex_data>         sign raw bytes\r\n");
+#endif
     usb_cdc_printf("  bench ed25519                          on-device sign+verify benchmark\r\n");
     usb_cdc_printf("  cosmos.chain.add <label> <chain_id> <host> <port> [<pubkey_hex>]\r\n");
     usb_cdc_printf("  cosmos.chain.remove <label>\r\n");
@@ -424,6 +426,14 @@ static int dispatch_os(const char *cmd, const char *args,
         reply[pubkey_len * 2] = '\0';
         return 0;
     }
+#if !PICOWALLET_TRUSTZONE
+    // Generic signing oracle for the TMKMS REPL. Under TZ this command
+    // is gone: the only NS-reachable signing paths are
+    //   - s_sign_sc_challenge: length-locked to 32 bytes (SC challenge),
+    //   - s_sign_and_advance:  fuses HWM strict-advance with the sign.
+    // A free-form REPL sign would have to be a third veneer that did
+    // not enforce HWM, i.e. exactly the s_sign_privval oracle we are
+    // retiring. Pre-TZ builds keep the command for debug ergonomics.
     if (strcmp(cmd, "sign") == 0) {
         // args: "<curve> <path> <hex_data>"
         char buf[512];
@@ -469,6 +479,7 @@ static int dispatch_os(const char *cmd, const char *args,
         hex_encode(sig, 64, reply);
         return 0;
     }
+#endif  // !PICOWALLET_TRUSTZONE
     if (strcmp(cmd, "bench") == 0) {
         if (strcmp(args, "ed25519") == 0) {
             return bench_ed25519(reply, reply_size);

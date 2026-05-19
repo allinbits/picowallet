@@ -23,15 +23,15 @@ int os_crypto_sign(os_curve_t curve, const char *path,
                    const uint8_t *data, size_t data_len,
                    uint8_t out_sig[64]) {
     if (curve != OS_CURVE_ED25519) return KEYSTORE_ERR_CURVE_UNSUPPORTED;
-    if (data_len == 32) {
-        // SC handshake challenge: routes through the length-locked
-        // veneer so this code path can't be abused as a generic oracle.
-        return s_sign_sc_challenge((uint8_t)curve, path, data, out_sig);
+    if (data_len != 32) {
+        // Under TZ this dispatcher only handles SC handshake challenges
+        // (length-locked, no HWM context). Privval canonical sign-bytes
+        // (variable length) MUST go through s_sign_and_advance directly,
+        // which fuses HWM strict-advance with the signature -- there is
+        // no generic signing oracle veneer.
+        return KEYSTORE_ERR_BAD_PATH;
     }
-    // Privval canonical sign-bytes (variable length). Phase 2c3 will
-    // replace this with s_sign_and_advance, which fuses HWM strict-
-    // advance with the signature.
-    return s_sign_privval(path, data, data_len, out_sig);
+    return s_sign_sc_challenge((uint8_t)curve, path, data, out_sig);
 }
 
 const char *os_crypto_status_str(int s) {
