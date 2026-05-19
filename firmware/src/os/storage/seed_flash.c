@@ -15,6 +15,8 @@
 #include "os/storage/chains.h"
 #include "os/storage/flash_layout.h"
 #include "os/storage/hwm_flash.h"
+#include "os/storage/slot_seed.h"
+#include "m9_otp.h"
 #include "trng.h"
 
 #define SEED_PAGE_SIZE          256u
@@ -50,7 +52,20 @@ _Static_assert(sizeof(seed_flash_page0_t) <= SEED_PAGE_SIZE,
 #define M9_ARGON2_PASSES  3u
 static uint8_t s_argon2_work[M9_ARGON2_BLOCKS * 1024u];
 
-// Derive a 32-byte KEK from PIN + salt via Argon2id.
+// Derive a 32-byte KEK from PIN (+ optional OTP device secret) + salt
+// via Argon2id.
+//
+// When PICOWALLET_M9_OTP_BIND is defined, the Argon2id `pass` input is
+// `OTP_SECRET || PIN`. The 32-byte per-device OTP secret is read (or,
+// on first use, burned) from a reserved OTP row -- see m9_otp.c.
+// Binding the KEK to the chip means a flash dump alone cannot be
+// brute-forced offline; the attacker also needs the OTP secret, which
+// is Secure-only (ACCESSCTRL_OTP locked since Phase 4) and survives
+// factory reset.
+//
+// When PICOWALLET_M9_OTP_BIND is undefined (default), the Argon2id
+// `pass` is just the PIN, so we avoid the one-time-permanent OTP
+// burn until the layout is committed.
 static void derive_kek(const uint8_t *pin, size_t pin_len,
                        const uint8_t salt[16], uint8_t out_kek[32]) {
     crypto_argon2_config cfg = {
@@ -59,6 +74,29 @@ static void derive_kek(const uint8_t *pin, size_t pin_len,
         .nb_passes = M9_ARGON2_PASSES,
         .nb_lanes  = 1u,
     };
+
+#if PICOWALLET_M9_OTP_BIND
+    uint8_t otp_secret[M9_OTP_DEVICE_SECRET_LEN];
+    if (m9_otp_get_device_secret(otp_secret) != 0) {
+        // Fail closed if the OTP read/burn fails: zero the KEK so the
+        // subsequent unseal/seal returns auth-failure rather than
+        // silently using bogus key material.
+        crypto_wipe(out_kek, 32);
+        return;
+    }
+    uint8_t pass_buf[M9_OTP_DEVICE_SECRET_LEN + M9_PIN_MAX_LEN];
+    memcpy(pass_buf, otp_secret, M9_OTP_DEVICE_SECRET_LEN);
+    memcpy(pass_buf + M9_OTP_DEVICE_SECRET_LEN, pin, pin_len);
+    crypto_wipe(otp_secret, sizeof(otp_secret));
+    crypto_argon2_inputs in = {
+        .pass      = pass_buf,
+        .salt      = salt,
+        .pass_size = (uint32_t)(M9_OTP_DEVICE_SECRET_LEN + pin_len),
+        .salt_size = 16u,
+    };
+    crypto_argon2(out_kek, 32u, s_argon2_work, cfg, in, crypto_argon2_no_extras);
+    crypto_wipe(pass_buf, sizeof(pass_buf));
+#else
     crypto_argon2_inputs in = {
         .pass      = pin,
         .salt      = salt,
@@ -66,39 +104,67 @@ static void derive_kek(const uint8_t *pin, size_t pin_len,
         .salt_size = 16u,
     };
     crypto_argon2(out_kek, 32u, s_argon2_work, cfg, in, crypto_argon2_no_extras);
+#endif
     crypto_wipe(s_argon2_work, sizeof(s_argon2_work));
+}
+
+int m9_seal_payload(const uint8_t *pin,        size_t pin_len,
+                    const uint8_t *plaintext,  size_t plain_len,
+                    uint8_t        out_salt[16],
+                    uint8_t        out_nonce[24],
+                    uint8_t       *out_ciphertext,
+                    uint8_t        out_tag[16]) {
+    if (!pin || !plaintext || !out_salt || !out_nonce ||
+        !out_ciphertext || !out_tag) return -1;
+    if (plain_len == 0 || plain_len > M9_SEAL_MAX_PAYLOAD) return -1;
+
+    m9_trng_fill(out_salt,  16);
+    m9_trng_fill(out_nonce, 24);
+
+    uint8_t kek[32];
+    derive_kek(pin, pin_len, out_salt, kek);
+    crypto_aead_lock(out_ciphertext, out_tag, kek, out_nonce,
+                     NULL, 0u, plaintext, plain_len);
+    crypto_wipe(kek, sizeof(kek));
+    return 0;
+}
+
+int m9_unseal_payload(const uint8_t *pin,        size_t pin_len,
+                      const uint8_t  salt[16],
+                      const uint8_t  nonce[24],
+                      const uint8_t *ciphertext, size_t cipher_len,
+                      const uint8_t  tag[16],
+                      uint8_t       *out_plaintext) {
+    if (!pin || !ciphertext || !out_plaintext) return -1;
+    if (cipher_len == 0 || cipher_len > M9_SEAL_MAX_PAYLOAD) return -1;
+    uint8_t kek[32];
+    derive_kek(pin, pin_len, salt, kek);
+    int rc = crypto_aead_unlock(out_plaintext, tag, kek, nonce,
+                                NULL, 0u, ciphertext, cipher_len);
+    crypto_wipe(kek, sizeof(kek));
+    if (rc != 0) {
+        crypto_wipe(out_plaintext, cipher_len);
+        return -1;
+    }
+    return 0;
 }
 
 int m9_seal_seed(const uint8_t *pin, size_t pin_len,
                  const uint8_t plaintext[M9_SEALED_SEED_LEN],
                  m9_sealed_seed_t *out) {
-    if (!pin || !plaintext || !out) return -1;
-    m9_trng_fill(out->salt,  sizeof(out->salt));
-    m9_trng_fill(out->nonce, sizeof(out->nonce));
-
-    uint8_t kek[32];
-    derive_kek(pin, pin_len, out->salt, kek);
-    crypto_aead_lock(out->ciphertext, out->tag, kek, out->nonce,
-                     NULL, 0u, plaintext, M9_SEALED_SEED_LEN);
-    crypto_wipe(kek, sizeof(kek));
-    return 0;
+    if (!out) return -1;
+    return m9_seal_payload(pin, pin_len, plaintext, M9_SEALED_SEED_LEN,
+                           out->salt, out->nonce, out->ciphertext, out->tag);
 }
 
 int m9_unseal_seed(const uint8_t *pin, size_t pin_len,
                    const m9_sealed_seed_t *in,
                    uint8_t out_plaintext[M9_SEALED_SEED_LEN]) {
-    if (!pin || !in || !out_plaintext) return -1;
-    uint8_t kek[32];
-    derive_kek(pin, pin_len, in->salt, kek);
-    int rc = crypto_aead_unlock(out_plaintext, in->tag, kek, in->nonce,
-                                NULL, 0u, in->ciphertext, M9_SEALED_SEED_LEN);
-    crypto_wipe(kek, sizeof(kek));
-    if (rc != 0) {
-        // Auth failure: ensure caller doesn't see partial plaintext.
-        crypto_wipe(out_plaintext, M9_SEALED_SEED_LEN);
-        return -1;
-    }
-    return 0;
+    if (!in) return -1;
+    return m9_unseal_payload(pin, pin_len,
+                             in->salt, in->nonce,
+                             in->ciphertext, M9_SEALED_SEED_LEN,
+                             in->tag, out_plaintext);
 }
 
 // ============================================================================
@@ -171,15 +237,43 @@ void m9_pin_attempt_reset(void) {
     restore_interrupts(ints);
 }
 
+// ----- PIN cache (Secure RAM) ----------------------------------------------
+
+static uint8_t s_pin_cache[M9_PIN_MAX_LEN];
+static size_t  s_pin_cache_len = 0;
+
+void m9_pin_cache_set(const uint8_t *pin, size_t pin_len) {
+    if (!pin || pin_len == 0 || pin_len > M9_PIN_MAX_LEN) {
+        m9_pin_cache_clear();
+        return;
+    }
+    memcpy(s_pin_cache, pin, pin_len);
+    s_pin_cache_len = pin_len;
+}
+
+size_t m9_pin_cache_get(uint8_t out[M9_PIN_MAX_LEN]) {
+    if (s_pin_cache_len == 0 || !out) return 0;
+    memcpy(out, s_pin_cache, s_pin_cache_len);
+    return s_pin_cache_len;
+}
+
+void m9_pin_cache_clear(void) {
+    crypto_wipe(s_pin_cache, sizeof(s_pin_cache));
+    s_pin_cache_len = 0;
+}
+
 void m9_factory_wipe_all(void) {
     // SEED first so an interrupted wipe leaves a "no PIN configured"
-    // state rather than chain config without a seed. chains_wipe /
-    // hwm_flash_wipe come from the existing storage modules.
+    // state rather than chain config without a seed. SLOT_SEEDS,
+    // chains, HWM follow. All four storage regions get cleared so the
+    // device returns to a truly blank state.
     uint32_t ints = save_and_disable_interrupts();
     flash_range_erase(SEED_FLASH_OFFSET, SEED_FLASH_SIZE);
     restore_interrupts(ints);
+    m9_slot_seeds_wipe_all();
     chains_wipe();
     hwm_flash_wipe();
+    m9_pin_cache_clear();
 }
 
 #endif  // PICOWALLET_SECURE_BUILD

@@ -21,6 +21,7 @@
 // round-trips a random payload entirely in RAM.
 
 #define M9_SEALED_SEED_LEN  64u   // master seed = 64B BIP-39 PBKDF2 output
+#define M9_SEAL_MAX_PAYLOAD 64u   // upper bound across all sealed types
 
 typedef struct {
     uint8_t salt[16];                          // Argon2id salt (TRNG at seal time)
@@ -30,14 +31,35 @@ typedef struct {
 } m9_sealed_seed_t;
 _Static_assert(sizeof(m9_sealed_seed_t) == 120, "seed blob must be 120 bytes");
 
-// Seal: encrypt `plaintext` under a key derived from PIN+fresh-salt;
-// fills `out` with salt + nonce + ciphertext + tag. Returns 0.
+// Generic seal/unseal over arbitrary payloads up to M9_SEAL_MAX_PAYLOAD.
+// salt + nonce + tag are caller-managed (fresh on seal, replayed on
+// unseal); the per-Phase-7-region storage layer wraps these to assemble
+// the on-flash blob. Argon2id workspace + KEK lifetime are internal.
+//
+// seal: writes salt + nonce + ciphertext + tag. Returns 0.
+// unseal: verifies tag against PIN-derived KEK; returns 0 on match,
+// -1 on auth failure.
+int m9_seal_payload(const uint8_t *pin,        size_t pin_len,
+                    const uint8_t *plaintext,  size_t plain_len,
+                    uint8_t        out_salt[16],
+                    uint8_t        out_nonce[24],
+                    uint8_t       *out_ciphertext,
+                    uint8_t        out_tag[16]);
+
+int m9_unseal_payload(const uint8_t *pin,        size_t pin_len,
+                      const uint8_t  salt[16],
+                      const uint8_t  nonce[24],
+                      const uint8_t *ciphertext, size_t cipher_len,
+                      const uint8_t  tag[16],
+                      uint8_t       *out_plaintext);
+
+// Convenience wrappers around the generic API for the 64-byte master
+// seed (Phase 7.1 + 7.2). Identical semantics to m9_seal_payload but
+// with the fixed-shape m9_sealed_seed_t blob.
 int m9_seal_seed(const uint8_t *pin, size_t pin_len,
                  const uint8_t plaintext[M9_SEALED_SEED_LEN],
                  m9_sealed_seed_t *out);
 
-// Unseal: verify Poly1305 tag and decrypt. Returns 0 on success,
-// -1 on authentication failure (wrong PIN or tampered blob).
 int m9_unseal_seed(const uint8_t *pin, size_t pin_len,
                    const m9_sealed_seed_t *in,
                    uint8_t out_plaintext[M9_SEALED_SEED_LEN]);
@@ -80,10 +102,20 @@ void m9_pin_attempt_record_failure(void);
 // the sealed blob. Called after a successful unlock.
 void m9_pin_attempt_reset(void);
 
-// Full wipe: erase SEED + CHAINS + HWM sectors. Called when the PIN
-// attempt counter hits M9_PIN_MAX_ATTEMPTS; also invokable from the
-// factory-reset confirm flow.
+// Full wipe: erase SEED + SLOT_SEEDS + CHAINS + HWM sectors. Called
+// when the PIN attempt counter hits M9_PIN_MAX_ATTEMPTS; also invokable
+// from the factory-reset confirm flow.
 void m9_factory_wipe_all(void);
+
+// ----- PIN cache (Secure RAM only) ----------------------------------------
+//
+// After s_pin_unlock succeeds, the PIN is stashed Secure-side so the
+// per-slot override unseal path (Phase 7.5) can decrypt slot blobs
+// without re-prompting on every sign. Lives in Secure BSS; cleared on
+// factory wipe.
+void   m9_pin_cache_set(const uint8_t *pin, size_t pin_len);
+size_t m9_pin_cache_get(uint8_t out[M9_PIN_MAX_LEN]);
+void   m9_pin_cache_clear(void);
 
 // Veneer-callable return codes (mirrors veneers.c's M9_NEG_*).
 #define M9_PIN_OK              0

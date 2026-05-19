@@ -226,6 +226,35 @@ bool s_pin_is_initialized(void);
 // Diagnostic: current count of failed-unlock attempts (0..M9_PIN_MAX_ATTEMPTS).
 uint8_t s_pin_attempts(void);
 
+// --- Phase 7.5: per-slot seed source diagnostic -------------------------
+// Returns the slot's configured seed source:
+//   0 = DERIVED (uses master mnemonic + slot's BIP-44 path)
+//   1 = MNEMONIC (slot has its own BIP-39 seed)
+//   2 = RAW_KEY  (slot has an imported 32-byte Ed25519 priv-key)
+// Returns 0 for any out-of-range slot index.
+uint8_t s_slot_seed_source(uint8_t slot_idx);
+
+// --- Phase 7.5: per-slot seed setup --------------------------------------
+//
+// All three flows seal the slot blob with the cached master PIN
+// (populated by s_pin_unlock on this same boot). NS doesn't need to
+// pass the PIN; it never sees the slot's key material.
+//
+// Returns 0 on success; negative on failure.
+
+// Drive the Secure-side mnemonic-generate-or-restore UI (same flow as
+// master setup) and seal the resulting 64-byte BIP-39 seed for the
+// given slot. Replaces whatever override that slot previously had.
+int s_slot_setup_mnemonic(uint8_t slot_idx);
+
+// Import a 32-byte raw Ed25519 priv-key seed for the given slot. NS
+// supplies the 32 bytes (typed/pasted from the operator's existing
+// priv_validator_key.json). Secure validates the range, seals, stores.
+int s_slot_import_raw_key(uint8_t slot_idx, const uint8_t priv32[32]);
+
+// Erase the slot's sector. Slot returns to DERIVED.
+int s_slot_clear_override(uint8_t slot_idx);
+
 // --- Phase 7.1 self-test ------------------------------------------------
 //
 // Round-trip the seal/unseal primitives entirely in Secure RAM. NS

@@ -21,6 +21,19 @@ option(PICOWALLET_M9_NEGATIVE_TEST
        "Run the NS-deref-Secure-VA boundary check at NS boot"
        OFF)
 
+# Phase 7.5 OTP-binding. When ON, the Argon2id KEK derivation mixes in
+# a per-device 32-byte secret stored at OTP row 2048. The secret is
+# burned (one-time-permanent) at the first KEK derivation on a fresh
+# chip and bound to that chip forever -- a flash dump alone cannot be
+# brute-forced offline without ALSO extracting the OTP value.
+#
+# Default OFF: KEK = Argon2id(PIN, salt). Flipping ON commits a
+# permanent OTP burn on every device that boots the build; only enable
+# once you are committed to the OTP layout.
+option(PICOWALLET_M9_OTP_BIND
+       "Mix OTP-stored device secret into the PIN-derived KEK (permanent burn)"
+       OFF)
+
 # Dependencies are git submodules under third_party/. Run:
 #   git submodule update --init --recursive
 # from the repo root after cloning.

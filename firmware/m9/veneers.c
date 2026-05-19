@@ -45,7 +45,9 @@
 #include "os/crypto/sha256.h"
 #include "os/crypto/monocypher.h"
 #include "os/crypto/bip39.h"
+#include "os/crypto/keystore.h"
 #include "os/storage/seed_flash.h"
+#include "os/storage/slot_seed.h"
 #include "os/ui/pin_ui.h"
 
 // Phase 2c: signing veneers reach into Secure-side keystore.c which has
@@ -243,8 +245,44 @@ int s_sign_and_advance(const s_sign_and_advance_args_t *args) {
     // honor the HWM advance (the height is "used"), so a sign failure
     // wedges this height for the slot but doesn't let NS retry-double-
     // sign at the same height.
-    return os_crypto_sign((os_curve_t)v.curve, v.path,
-                          v.data, v.data_len, v.out_sig);
+    //
+    // Phase 7.5 dispatch: a slot may carry its own seed material that
+    // overrides the master.
+    slot_seed_source_t src = m9_slot_seed_source(v.hwm_slot_idx);
+    if (src == SLOT_SEED_SOURCE_DERIVED) {
+        // Default path: master mnemonic / TEST_SEED (until 7.6) +
+        // slot's BIP-44 path. Keeps every existing call site working.
+        return os_crypto_sign((os_curve_t)v.curve, v.path,
+                              v.data, v.data_len, v.out_sig);
+    }
+
+    // Override path: unseal the slot's blob using the cached PIN, then
+    // sign with the chain-specific key material.
+    uint8_t pin[M9_PIN_MAX_LEN];
+    size_t  pin_len = m9_pin_cache_get(pin);
+    if (pin_len == 0) {
+        // Should not happen: this veneer is callable only after
+        // s_pin_unlock OK, which seeded the cache. Bail rather than
+        // accidentally falling back to the master key.
+        return -3;
+    }
+    uint8_t slot_buf[64];
+    size_t  plain_len = m9_slot_seed_unseal(v.hwm_slot_idx, pin, pin_len, slot_buf);
+    crypto_wipe(pin, sizeof(pin));
+    if (plain_len == 0) {
+        crypto_wipe(slot_buf, sizeof(slot_buf));
+        return -3;
+    }
+    int sign_rc;
+    if (src == SLOT_SEED_SOURCE_MNEMONIC) {
+        sign_rc = keystore_sign_with_bip39_seed(slot_buf, v.path,
+                                                v.data, v.data_len, v.out_sig);
+    } else {  // SLOT_SEED_SOURCE_RAW_KEY
+        sign_rc = keystore_sign_with_raw_key(slot_buf,
+                                             v.data, v.data_len, v.out_sig);
+    }
+    crypto_wipe(slot_buf, sizeof(slot_buf));
+    return sign_rc;
 }
 
 __attribute__((cmse_nonsecure_entry))
@@ -451,15 +489,22 @@ static int do_pin_setup_internal(void) {
     pin_ui_show_busy("Sealing...");
     m9_sealed_seed_t blob;
     int seal_rc = m9_seal_seed((const uint8_t *)pin1, (size_t)n1, seed, &blob);
-    crypto_wipe(pin1, sizeof(pin1));
     crypto_wipe(seed, sizeof(seed));
     if (seal_rc != 0) {
+        crypto_wipe(pin1, sizeof(pin1));
         crypto_wipe(&blob, sizeof(blob));
         return M9_PIN_ERR_INTERNAL;
     }
     int rc = m9_seed_flash_store(&blob);
     crypto_wipe(&blob, sizeof(blob));
-    if (rc != 0) return M9_PIN_ERR_INTERNAL;
+    if (rc != 0) {
+        crypto_wipe(pin1, sizeof(pin1));
+        return M9_PIN_ERR_INTERNAL;
+    }
+    // Cache the PIN so the operator doesn't have to re-enter to use
+    // per-slot overrides on this same boot.
+    m9_pin_cache_set((const uint8_t *)pin1, (size_t)n1);
+    crypto_wipe(pin1, sizeof(pin1));
     pin_ui_show_status("Setup complete");
     return M9_PIN_OK;
 }
@@ -499,12 +544,90 @@ int s_pin_unlock(void) {
         return M9_PIN_ERR_BAD_PIN;
     }
     m9_pin_attempt_reset();
+    // Cache the PIN Secure-side so the per-slot override unseal path
+    // (Phase 7.5) can decrypt slot blobs at sign time without
+    // re-prompting.
+    m9_pin_cache_set((const uint8_t *)pin, (size_t)n);
     return M9_PIN_OK;
 }
 
 __attribute__((cmse_nonsecure_entry))
 bool s_pin_is_initialized(void) {
     return m9_seed_flash_is_initialized();
+}
+
+__attribute__((cmse_nonsecure_entry))
+uint8_t s_slot_seed_source(uint8_t slot_idx) {
+    return (uint8_t)m9_slot_seed_source(slot_idx);
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_slot_setup_mnemonic(uint8_t slot_idx) {
+    if (slot_idx >= SLOT_SEED_COUNT) return -1;
+    uint8_t pin[M9_PIN_MAX_LEN];
+    size_t  pin_len = m9_pin_cache_get(pin);
+    if (pin_len == 0) return -2;          // device not unlocked yet
+
+    // Generate-or-restore flow, same UI as master setup.
+    int mode = pin_ui_setup_mode();
+    uint16_t words[BIP39_MNEMONIC_WORDS];
+    if (mode == PIN_UI_SETUP_GENERATE) {
+        pin_ui_show_busy("Generating...");
+        uint8_t entropy[BIP39_ENTROPY_BYTES];
+        m9_trng_fill(entropy, sizeof(entropy));
+        bip39_generate(entropy, words);
+        crypto_wipe(entropy, sizeof(entropy));
+        pin_ui_show_mnemonic(words);
+    } else {
+        while (pin_ui_restore_mnemonic(words) != 0) {
+            crypto_wipe(words, sizeof(words));
+        }
+    }
+
+    pin_ui_show_busy("Deriving seed...");
+    uint8_t seed[64];
+    bip39_to_seed(words, seed);
+    crypto_wipe(words, sizeof(words));
+
+    pin_ui_show_busy("Sealing...");
+    int rc = m9_slot_seed_store(slot_idx, SLOT_SEED_SOURCE_MNEMONIC,
+                                pin, pin_len, seed, sizeof(seed));
+    crypto_wipe(pin,  sizeof(pin));
+    crypto_wipe(seed, sizeof(seed));
+    if (rc != 0) {
+        pin_ui_show_status("Slot setup FAIL");
+        return -3;
+    }
+    pin_ui_show_status("Slot set");
+    return 0;
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_slot_import_raw_key(uint8_t slot_idx, const uint8_t priv32[32]) {
+    if (slot_idx >= SLOT_SEED_COUNT) return -1;
+    if (!priv32) return M9_NEG_PTR;
+    const void *chk = cmse_check_address_range(
+        (void *)priv32, 32, CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!chk) return M9_NEG_PTR;
+
+    uint8_t pin[M9_PIN_MAX_LEN];
+    size_t  pin_len = m9_pin_cache_get(pin);
+    if (pin_len == 0) return -2;
+
+    uint8_t key[32];
+    memcpy(key, chk, 32);
+    int rc = m9_slot_seed_store(slot_idx, SLOT_SEED_SOURCE_RAW_KEY,
+                                pin, pin_len, key, sizeof(key));
+    crypto_wipe(pin, sizeof(pin));
+    crypto_wipe(key, sizeof(key));
+    return (rc == 0) ? 0 : -3;
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_slot_clear_override(uint8_t slot_idx) {
+    if (slot_idx >= SLOT_SEED_COUNT) return -1;
+    m9_slot_seed_clear(slot_idx);
+    return 0;
 }
 
 __attribute__((cmse_nonsecure_entry))

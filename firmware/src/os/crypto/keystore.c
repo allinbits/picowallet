@@ -133,16 +133,22 @@ static int slip10_ed25519_step(uint8_t node[64], uint32_t index) {
     return KEYSTORE_OK;
 }
 
-// Derive an Ed25519 secret key (64 bytes) and public key (32 bytes) for the
-// given path. Returns 0 on success, negative keystore_status_t on failure.
-static int derive_ed25519(const char *path,
-                          uint8_t secret_key[64], uint8_t public_key[32]) {
+// Derive an Ed25519 keypair (secret_key 64 bytes, public_key 32 bytes)
+// from an arbitrary seed via SLIP-10. The seed is fed into the master
+// HMAC instead of using TEST_SEED, so the same derivation logic serves
+// the master seed (Phase 7.6) and per-slot MNEMONIC overrides (Phase 7.5).
+static int derive_ed25519_from_seed(const uint8_t *seed, size_t seed_len,
+                                    const char *path,
+                                    uint8_t secret_key[64], uint8_t public_key[32]) {
     uint32_t indices[KEYSTORE_MAX_DEPTH];
     int n = parse_path(path, indices, KEYSTORE_MAX_DEPTH);
     if (n < 0) return n;
 
     uint8_t node[64];
-    slip10_ed25519_master(node);
+    crypto_sha512_hmac(node,
+                       (const uint8_t *)SLIP10_ED25519_MASTER,
+                       sizeof(SLIP10_ED25519_MASTER) - 1,
+                       seed, seed_len);
     for (int i = 0; i < n; i++) {
         int rc = slip10_ed25519_step(node, indices[i]);
         if (rc != KEYSTORE_OK) {
@@ -157,6 +163,48 @@ static int derive_ed25519(const char *path,
 
     memset(ed_seed, 0, sizeof(ed_seed));
     memset(node,    0, sizeof(node));
+    return KEYSTORE_OK;
+}
+
+// Master-seed wrapper: keeps the pre-7.5 derivation path working
+// against the hardcoded TEST_SEED.
+static int derive_ed25519(const char *path,
+                          uint8_t secret_key[64], uint8_t public_key[32]) {
+    return derive_ed25519_from_seed(TEST_SEED, sizeof(TEST_SEED),
+                                    path, secret_key, public_key);
+}
+
+// Public Secure-side helpers used by s_sign_and_advance when the slot's
+// seed source is MNEMONIC (BIP-39 64-byte seed -> SLIP-10) or RAW_KEY
+// (32-byte Ed25519 seed used directly).
+int keystore_sign_with_bip39_seed(const uint8_t bip39_seed[64],
+                                  const char *path,
+                                  const uint8_t *data, size_t data_len,
+                                  uint8_t out_sig[64]) {
+    if (!bip39_seed || !path || !data || !out_sig) return KEYSTORE_ERR_BAD_PATH;
+    uint8_t sk[64];
+    uint8_t pk[32];
+    int rc = derive_ed25519_from_seed(bip39_seed, 64, path, sk, pk);
+    if (rc != KEYSTORE_OK) {
+        memset(sk, 0, sizeof(sk));
+        return rc;
+    }
+    crypto_ed25519_sign(out_sig, sk, data, data_len);
+    memset(sk, 0, sizeof(sk));
+    memset(pk, 0, sizeof(pk));
+    return KEYSTORE_OK;
+}
+
+int keystore_sign_with_raw_key(const uint8_t raw_seed[32],
+                               const uint8_t *data, size_t data_len,
+                               uint8_t out_sig[64]) {
+    if (!raw_seed || !data || !out_sig) return KEYSTORE_ERR_BAD_PATH;
+    uint8_t sk[64];
+    uint8_t pk[32];
+    crypto_ed25519_key_pair(sk, pk, raw_seed);
+    crypto_ed25519_sign(out_sig, sk, data, data_len);
+    memset(sk, 0, sizeof(sk));
+    memset(pk, 0, sizeof(pk));
     return KEYSTORE_OK;
 }
 

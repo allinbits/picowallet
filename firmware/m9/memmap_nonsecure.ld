@@ -5,12 +5,12 @@
  *     usual 0x10000000. The Boot ROM enters the Secure image first;
  *     the Secure stub then BLXNS-es to this image's reset handler at
  *     0x10080000.
- *   - FLASH length stops at the SEED sector (0x102FE000) so the NS
- *     image cannot overlap the persistent regions even by accident.
- *     SEED (Phase 7.1 master-seed blob) + Chains config + HWM remain
- *     memory-mapped at their pre-M9 offsets; chains/HWM are NS-readable
- *     via XIP under SAU region 1 (SEED is too, but its contents are
- *     PIN-encrypted so the readability doesn't matter).
+ *   - FLASH length stops just below the SLOT_SEEDS region (0x102EE000)
+ *     so the NS image cannot overlap the persistent regions even by
+ *     accident. SLOT_SEEDS + SEED + Chains config + HWM remain
+ *     memory-mapped at their offsets; chains/HWM are NS-readable via
+ *     XIP under SAU region 1 (SEED + SLOT_SEEDS are too, but their
+ *     contents are PIN-encrypted so the readability doesn't matter).
  *   - RAM starts at M9_NONSECURE_SRAM_BASE (0x20020000) and is bounded
  *     to M9_NONSECURE_SRAM_SIZE (384 KB). SCRATCH_X / SCRATCH_Y stay
  *     at their original addresses (0x20080000-0x20082000), still NS,
@@ -22,7 +22,7 @@
 
 MEMORY
 {
-    FLASH(rx) : ORIGIN = 0x10080000, LENGTH = 0x0027E000   /* 0x10080000 .. 0x102FE000 */
+    FLASH(rx) : ORIGIN = 0x10080000, LENGTH = 0x0026E000   /* 0x10080000 .. 0x102EE000 (SLOT_SEEDS starts here) */
     RAM(rwx)  : ORIGIN = 0x20020000, LENGTH = 384k
     SCRATCH_X(rwx) : ORIGIN = 0x20080000, LENGTH = 4k
     SCRATCH_Y(rwx) : ORIGIN = 0x20081000, LENGTH = 4k

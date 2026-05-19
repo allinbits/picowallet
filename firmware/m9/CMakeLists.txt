@@ -14,8 +14,12 @@ add_executable(picowallet_secure
     secure_stub.c
     veneers.c
     trng.c
+    # Phase 7.5: per-device OTP secret mixed into the Argon2id KEK input.
+    m9_otp.c
     # Phase 7.1: PIN-sealed master-seed primitives (Argon2id + AEAD).
     ../src/os/storage/seed_flash.c
+    # Phase 7.5: per-chain-slot seed override storage.
+    ../src/os/storage/slot_seed.c
     # Phase 7.2b: Secure-side PIN entry UI (button + e-paper).
     ../src/os/ui/pin_ui.c
     # Phase 7.3: BIP-39 mnemonic generate + PBKDF2-HMAC-SHA512 derivation.
@@ -82,6 +86,11 @@ target_include_directories(picowallet_secure PRIVATE
 # os_crypto_*() symbols, but those become thin veneer wrappers under
 # PICOWALLET_TRUSTZONE in the NS build.
 target_compile_definitions(picowallet_secure PRIVATE PICOWALLET_SECURE_BUILD=1)
+
+if(PICOWALLET_M9_OTP_BIND)
+    target_compile_definitions(picowallet_secure PRIVATE PICOWALLET_M9_OTP_BIND=1)
+    message(STATUS "M9.5: OTP-binding ENABLED -- first PIN op will BURN a device secret to OTP row 2048")
+endif()
 
 # -mcmse turns on TrustZone-M code generation:
 #   - enables MSR msp_ns, BXNS, BLXNS, SG instructions

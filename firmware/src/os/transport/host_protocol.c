@@ -103,6 +103,12 @@ void host_protocol_print_help(void) {
     usb_cdc_printf("  bench ed25519                          on-device sign+verify benchmark\r\n");
 #if PICOWALLET_TRUSTZONE
     usb_cdc_printf("  seal_selftest <pin>                    M9.5 seal/unseal smoke test (4-16 chars)\r\n");
+    usb_cdc_printf("  pin_status                             initialized + failed-attempt count\r\n");
+    usb_cdc_printf("  slot_list                              dump all 16 slots (family/label/chain_id/source)\r\n");
+    usb_cdc_printf("  slot_source <0..15>                    slot's seed source (DERIVED/MNEMONIC/RAW_KEY)\r\n");
+    usb_cdc_printf("  slot_mnemonic <0..15>                  set slot mnemonic via on-device UI\r\n");
+    usb_cdc_printf("  slot_import <0..15> <64-hex>           import 32B Ed25519 priv-key for slot\r\n");
+    usb_cdc_printf("  slot_clear <0..15>                     drop slot override -> DERIVED\r\n");
 #endif
     usb_cdc_printf("  cosmos.chain.add <label> <chain_id> <host> <port> [<pubkey_hex>]\r\n");
     usb_cdc_printf("  cosmos.chain.remove <label>\r\n");
@@ -489,6 +495,107 @@ static int dispatch_os(const char *cmd, const char *args,
     }
 #endif  // !PICOWALLET_TRUSTZONE
 #if PICOWALLET_TRUSTZONE
+    if (strcmp(cmd, "slot_mnemonic") == 0) {
+        // os.slot_mnemonic <0..15>  -- Secure-side UI picks gen/restore
+        int slot_idx = atoi(args);
+        if (slot_idx < 0 || slot_idx > 15) {
+            snprintf(reply, reply_size, "usage: os.slot_mnemonic <0..15>");
+            return -1;
+        }
+        int rc = s_slot_setup_mnemonic((uint8_t)slot_idx);
+        if (rc == 0) snprintf(reply, reply_size, "ok: slot %d mnemonic set", slot_idx);
+        else if (rc == -2) snprintf(reply, reply_size, "FAIL: device locked");
+        else               snprintf(reply, reply_size, "FAIL rc=%d", rc);
+        return rc == 0 ? 0 : -1;
+    }
+    if (strcmp(cmd, "slot_import") == 0) {
+        // os.slot_import <0..15> <64-hex>
+        char buf[200];
+        strncpy(buf, args, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        char *sp = strchr(buf, ' ');
+        if (!sp) {
+            snprintf(reply, reply_size, "usage: os.slot_import <0..15> <64-hex>");
+            return -1;
+        }
+        *sp = '\0';
+        int slot_idx = atoi(buf);
+        const char *hex = sp + 1;
+        if (slot_idx < 0 || slot_idx > 15) {
+            snprintf(reply, reply_size, "slot out of range");
+            return -1;
+        }
+        if (strlen(hex) != 64) {
+            snprintf(reply, reply_size, "expected 64 hex chars (32 bytes)");
+            return -1;
+        }
+        uint8_t key[32];
+        size_t  klen = 0;
+        if (hex_decode(hex, key, sizeof(key), &klen) != 0 || klen != 32) {
+            snprintf(reply, reply_size, "bad hex");
+            return -1;
+        }
+        int rc = s_slot_import_raw_key((uint8_t)slot_idx, key);
+        // wipe local copy promptly
+        for (size_t i = 0; i < sizeof(key); i++) key[i] = 0;
+        if (rc == 0) snprintf(reply, reply_size, "ok: slot %d raw key sealed", slot_idx);
+        else if (rc == -2) snprintf(reply, reply_size, "FAIL: device locked");
+        else               snprintf(reply, reply_size, "FAIL rc=%d", rc);
+        return rc == 0 ? 0 : -1;
+    }
+    if (strcmp(cmd, "slot_clear") == 0) {
+        int slot_idx = atoi(args);
+        if (slot_idx < 0 || slot_idx > 15) {
+            snprintf(reply, reply_size, "usage: os.slot_clear <0..15>");
+            return -1;
+        }
+        int rc = s_slot_clear_override((uint8_t)slot_idx);
+        if (rc == 0) snprintf(reply, reply_size, "ok: slot %d -> DERIVED", slot_idx);
+        else         snprintf(reply, reply_size, "FAIL rc=%d", rc);
+        return rc == 0 ? 0 : -1;
+    }
+    if (strcmp(cmd, "slot_list") == 0) {
+        // One-shot dump of all 16 HWM slots with family / label /
+        // chain_id / seed-source. Single-call summary instead of
+        // cross-referencing chain.list per family + slot_source per
+        // index.
+        usb_cdc_printf("slot family   label                chain_id                                  source\r\n");
+        usb_cdc_printf("---- -------- -------------------- ----------------------------------------  --------\r\n");
+        for (uint8_t i = 0; i < 16; i++) {
+            chains_family_t fam = (i < 8) ? CHAINS_FAMILY_COSMOS : CHAINS_FAMILY_GNO;
+            size_t          si  = (i < 8) ? i : (size_t)(i - 8);
+            const chain_slot_t *cs = chains_get(fam, si);
+            uint8_t src = s_slot_seed_source(i);
+            const char *src_s = (src == 1) ? "MNEMONIC" : (src == 2) ? "RAW_KEY" : "DERIVED";
+            if (cs && cs->in_use) {
+                usb_cdc_printf("%-4u %-8s %-20s %-40s  %s\r\n",
+                               (unsigned)i,
+                               fam == CHAINS_FAMILY_COSMOS ? "cosmos" : "gno",
+                               cs->label, cs->chain_id, src_s);
+            } else {
+                usb_cdc_printf("%-4u %-8s (empty)                                                       %s\r\n",
+                               (unsigned)i,
+                               fam == CHAINS_FAMILY_COSMOS ? "cosmos" : "gno",
+                               src_s);
+            }
+        }
+        snprintf(reply, reply_size, "ok");
+        return 0;
+    }
+    if (strcmp(cmd, "slot_source") == 0) {
+        // os.slot_source <0..15>
+        int slot_idx = atoi(args);
+        if (slot_idx < 0 || slot_idx > 15) {
+            snprintf(reply, reply_size, "usage: os.slot_source <0..15>");
+            return -1;
+        }
+        uint8_t src = s_slot_seed_source((uint8_t)slot_idx);
+        const char *name = (src == 1) ? "MNEMONIC"
+                         : (src == 2) ? "RAW_KEY"
+                                      : "DERIVED";
+        snprintf(reply, reply_size, "slot %d: %s", slot_idx, name);
+        return 0;
+    }
     if (strcmp(cmd, "pin_status") == 0) {
         snprintf(reply, reply_size, "initialized=%d attempts=%u/%u",
                  (int)s_pin_is_initialized(),
