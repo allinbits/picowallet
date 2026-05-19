@@ -222,6 +222,27 @@ static void m9_accessctrl_open_for_ns(void) {
     // NS peripherals -- if it grows trust-sensitive uses it gets the
     // same treatment).
     r[0x94 / 4u] = PW | 0xFCu;   // ACCESSCTRL_SPI1
+
+    // OTP: holds factory-set chip identity + future M9.5 sealed-seed
+    // material. NS never reads or writes it directly under TZ
+    // (pico_unique_id goes through rom_get_sys_info which is the
+    // NS-callable bootrom path, not a direct OTP MMIO).
+    r[0xA8 / 4u] = PW | 0xFCu;   // ACCESSCTRL_OTP
+
+    // POWMAN: power-management controller (reset, sleep, scratch). NS
+    // has no business changing power policy or scratch registers; a
+    // POWMAN write from NS could otherwise wedge boot or stage a fake
+    // reset cause to mislead the operator.
+    r[0xB0 / 4u] = PW | 0xFCu;   // ACCESSCTRL_POWMAN
+
+    // WATCHDOG: NS does not call watchdog_enable / watchdog_reboot
+    // anywhere. Locking prevents a compromised NS from disabling the
+    // watchdog (if we later enable it Secure-side) or rebooting via
+    // a poisoned PC/SP pair through watchdog_reboot.
+    // (Note: on RP2350 the per-tick generators moved to a separate
+    // TICKS peripheral, so watchdog_hw->tick is no longer in the
+    // runtime-init hot path -- safe to lock independently.)
+    r[0xD8 / 4u] = PW | 0xFCu;   // ACCESSCTRL_WATCHDOG
     __asm__ volatile("dsb");
 }
 
