@@ -6,6 +6,22 @@
 
 #define SHA256_BLOCK_LEN 64
 
+#if PICOWALLET_TRUSTZONE
+// Override pico_sha256's weak lock/unlock. The SDK's version goes through
+// bootrom_try_acquire_lock which writes to a BOOTRAM bootlock register at
+// 0x400E080C; that region is Secure-only on RP2350, so NS faults with a
+// precise BusFault. PicoWallet's NS image is single-core + single-threaded,
+// so we don't need cross-master coordination on the SHA-256 peripheral.
+// ACCESSCTRL_SHA256 is opened to NS in the Secure stub.
+bool pico_sha256_lock(pico_sha256_state_t *state) {
+    state->locked = true;
+    return true;
+}
+void pico_sha256_unlock(pico_sha256_state_t *state) {
+    state->locked = false;
+}
+#endif
+
 static void sha256_oneshot(const uint8_t *data, size_t len, uint8_t out[SHA256_OUT_LEN]) {
     pico_sha256_state_t st;
     // Claim the peripheral; block until available. Single-threaded firmware,

@@ -2,11 +2,61 @@
 
 #include "os/crypto/keystore.h"
 #include "os/api.h"
+
+#if PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD
+// ============================================================================
+// Non-Secure side. The seed never appears here -- every signing-related
+// call delegates to the Secure veneer (NSC entry in firmware/m9/veneers.c).
+// ============================================================================
+#include "os/secure_api.h"
+
+int os_crypto_get_pubkey(os_curve_t curve, const char *path,
+                         uint8_t *out_pubkey, size_t out_size,
+                         size_t *out_len) {
+    if (out_size < 32) return KEYSTORE_ERR_BUFFER_TOO_SMALL;
+    int rc = s_get_pubkey((uint8_t)curve, path, out_pubkey);
+    if (rc == 0) *out_len = 32;
+    return rc;
+}
+
+int os_crypto_sign(os_curve_t curve, const char *path,
+                   const uint8_t *data, size_t data_len,
+                   uint8_t out_sig[64]) {
+    if (curve != OS_CURVE_ED25519) return KEYSTORE_ERR_CURVE_UNSUPPORTED;
+    if (data_len == 32) {
+        // SC handshake challenge: routes through the length-locked
+        // veneer so this code path can't be abused as a generic oracle.
+        return s_sign_sc_challenge((uint8_t)curve, path, data, out_sig);
+    }
+    // Privval canonical sign-bytes (variable length). Phase 2c3 will
+    // replace this with s_sign_and_advance, which fuses HWM strict-
+    // advance with the signature.
+    return s_sign_privval(path, data, data_len, out_sig);
+}
+
+const char *os_crypto_status_str(int s) {
+    switch (s) {
+        case KEYSTORE_OK:                    return "ok";
+        case KEYSTORE_ERR_BAD_PATH:          return "bad_path";
+        case KEYSTORE_ERR_NON_HARDENED:      return "non_hardened_disallowed";
+        case KEYSTORE_ERR_CURVE_UNSUPPORTED: return "curve_not_implemented";
+        case KEYSTORE_ERR_BUFFER_TOO_SMALL:  return "buffer_too_small";
+        case KEYSTORE_ERR_PATH_TOO_DEEP:     return "path_too_deep";
+    }
+    return "derive_err";
+}
+
+#else
+// ============================================================================
+// Secure-side (or pre-TZ single-image): full implementation including the
+// seed. The same code path also services the SG veneers in veneers.c via
+// keystore_derive_pubkey / keystore_sign.
+// ============================================================================
 #include "os/crypto/monocypher-ed25519.h"
 
 // ============================================================================
-// TEST FIXTURE seed. M4 replaces this with seed unwrapped from encrypted flash
-// using the PIN. Do NOT use this build for real funds.
+// TEST FIXTURE seed. M9.5 replaces this with seed unwrapped from encrypted
+// flash using the PIN. Do NOT use this build for real funds.
 // ============================================================================
 static const uint8_t TEST_SEED[32] = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
@@ -17,7 +67,6 @@ static const uint8_t TEST_SEED[32] = {
 
 // Per SLIP-10 spec for Ed25519.
 static const char SLIP10_ED25519_MASTER[] = "ed25519 seed";
-static const uint8_t HARDENED_BIT = 0x80;
 
 // ---------------------------------------------------------------------------
 // Path parsing: "m" or "m/n[']/n[']/..."
@@ -84,32 +133,10 @@ static int slip10_ed25519_step(uint8_t node[64], uint32_t index) {
     return KEYSTORE_OK;
 }
 
-static int derive_ed25519(const char *path,
-                          uint8_t secret_key[64], uint8_t public_key[32]);
-
-// ---------------------------------------------------------------------------
-// Public entry point.
-// ---------------------------------------------------------------------------
-int os_crypto_get_pubkey(os_curve_t curve, const char *path,
-                         uint8_t *out_pubkey, size_t out_size,
-                         size_t *out_len) {
-    if (curve == OS_CURVE_SECP256K1) return KEYSTORE_ERR_CURVE_UNSUPPORTED;
-    if (curve != OS_CURVE_ED25519)   return KEYSTORE_ERR_CURVE_UNSUPPORTED;
-    if (out_size < 32)               return KEYSTORE_ERR_BUFFER_TOO_SMALL;
-
-    uint8_t secret_key[64];
-    int rc = derive_ed25519(path, secret_key, out_pubkey);
-    memset(secret_key, 0, sizeof(secret_key));
-    if (rc != KEYSTORE_OK) return rc;
-
-    *out_len = 32;
-    return KEYSTORE_OK;
-}
-
 // Derive an Ed25519 secret key (64 bytes) and public key (32 bytes) for the
 // given path. Returns 0 on success, negative keystore_status_t on failure.
 static int derive_ed25519(const char *path,
-                         uint8_t secret_key[64], uint8_t public_key[32]) {
+                          uint8_t secret_key[64], uint8_t public_key[32]) {
     uint32_t indices[KEYSTORE_MAX_DEPTH];
     int n = parse_path(path, indices, KEYSTORE_MAX_DEPTH);
     if (n < 0) return n;
@@ -130,6 +157,26 @@ static int derive_ed25519(const char *path,
 
     memset(ed_seed, 0, sizeof(ed_seed));
     memset(node,    0, sizeof(node));
+    return KEYSTORE_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Public entry points. Called directly in pre-TZ builds, and via the Secure
+// Gateway veneers (s_get_pubkey / s_sign_sc_challenge) under M9.
+// ---------------------------------------------------------------------------
+int os_crypto_get_pubkey(os_curve_t curve, const char *path,
+                         uint8_t *out_pubkey, size_t out_size,
+                         size_t *out_len) {
+    if (curve == OS_CURVE_SECP256K1) return KEYSTORE_ERR_CURVE_UNSUPPORTED;
+    if (curve != OS_CURVE_ED25519)   return KEYSTORE_ERR_CURVE_UNSUPPORTED;
+    if (out_size < 32)               return KEYSTORE_ERR_BUFFER_TOO_SMALL;
+
+    uint8_t secret_key[64];
+    int rc = derive_ed25519(path, secret_key, out_pubkey);
+    memset(secret_key, 0, sizeof(secret_key));
+    if (rc != KEYSTORE_OK) return rc;
+
+    *out_len = 32;
     return KEYSTORE_OK;
 }
 
@@ -165,3 +212,5 @@ const char *os_crypto_status_str(int s) {
     }
     return "derive_err";
 }
+
+#endif // PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD

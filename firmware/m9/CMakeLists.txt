@@ -11,12 +11,26 @@
 add_executable(picowallet_secure
     secure_stub.c
     veneers.c
+    # Phase 2c: keystore + Ed25519/SHA-512 move from NS to Secure. The seed
+    # (TEST_SEED today; encrypted-and-PIN-unlocked in M9.5) and the
+    # signing routines never appear in NS flash. NS reaches them only via
+    # the cmse_nonsecure_entry veneers in veneers.c.
+    ../src/os/crypto/keystore.c
+    ../src/os/crypto/monocypher-ed25519.c
+    ../src/os/crypto/monocypher.c
 )
 
 target_include_directories(picowallet_secure PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}     # for layout.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src   # for os/secure_api.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src   # for os/secure_api.h, os/api.h, os/crypto/*
 )
+
+# PICOWALLET_SECURE_BUILD=1 is defined ONLY for the Secure target. Use
+# inside keystore.c (and friends) to guard the TEST_SEED + derivation
+# code so they DON'T also compile into the NS image: NS still references
+# os_crypto_*() symbols, but those become thin veneer wrappers under
+# PICOWALLET_TRUSTZONE in the NS build.
+target_compile_definitions(picowallet_secure PRIVATE PICOWALLET_SECURE_BUILD=1)
 
 # -mcmse turns on TrustZone-M code generation:
 #   - enables MSR msp_ns, BXNS, BLXNS, SG instructions

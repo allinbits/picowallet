@@ -28,8 +28,19 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 
+#include "os/api.h"
 #include "os/secure_api.h"
 #include "os/storage/flash_layout.h"
+
+// Phase 2c: signing veneers reach into Secure-side keystore.c which has
+// the seed + SLIP-10 + Ed25519 + SHA-512 (all compiled only into the
+// Secure target via PICOWALLET_SECURE_BUILD).
+extern int os_crypto_get_pubkey(os_curve_t curve, const char *path,
+                                uint8_t *out_pubkey, size_t out_size,
+                                size_t *out_len);
+extern int os_crypto_sign(os_curve_t curve, const char *path,
+                          const uint8_t *data, size_t data_len,
+                          uint8_t out_sig[64]);
 
 // HWM layout constants -- mirror hwm_flash.c. Phase 2c will fold this into
 // a single Secure-side storage module once the keystore moves over.
@@ -101,6 +112,71 @@ int s_flash_erase_hwm_all(void) {
     flash_range_erase(HWM_FLASH_OFFSET, HWM_FLASH_SIZE);
     restore_interrupts(ints);
     return 0;
+}
+
+// --- Phase 2c: keystore-backed signing veneers -------------------------
+//
+// Walks an NS-supplied SLIP-10 path string through the Secure-side seed
+// (TEST_SEED, replaced by encrypted+PIN-unlocked seed in M9.5) and
+// returns the public key (s_get_pubkey) or a 32-byte SC-challenge
+// signature (s_sign_sc_challenge). Privval canonical sign-bytes routes
+// through the larger HWM-fused veneer (Phase 2c3).
+//
+// The path string is treated as length-bounded by KEYSTORE_MAX_PATH_LEN
+// scanning during cmse_check_address_range; we pass a generous upper
+// bound and the keystore's own parser bails on anything malformed.
+#define M9_KEYSTORE_MAX_PATH_LEN  128u
+
+__attribute__((cmse_nonsecure_entry))
+int s_get_pubkey(uint8_t curve, const char *path, uint8_t out_pubkey[32]) {
+    if (!path || !out_pubkey) return M9_NEG_PTR;
+    const void *path_chk = cmse_check_address_range(
+        (void *)path, 1, CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!path_chk) return M9_NEG_PTR;
+    const void *out_chk = cmse_check_address_range(
+        out_pubkey, 32, CMSE_NONSECURE | CMSE_MPU_READWRITE);
+    if (!out_chk) return M9_NEG_PTR;
+    size_t out_len = 0;
+    return os_crypto_get_pubkey((os_curve_t)curve, path, out_pubkey, 32, &out_len);
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_sign_privval(const char *path, const uint8_t *data, size_t data_len,
+                   uint8_t out_sig[64]) {
+    if (!path || !data || !out_sig) return M9_NEG_PTR;
+    if (data_len == 0 || data_len > 4096u) return M9_NEG_RANGE;
+    const void *path_chk = cmse_check_address_range(
+        (void *)path, 1, CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!path_chk) return M9_NEG_PTR;
+    const void *data_chk = cmse_check_address_range(
+        (void *)data, data_len, CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!data_chk) return M9_NEG_PTR;
+    const void *sig_chk = cmse_check_address_range(
+        out_sig, 64, CMSE_NONSECURE | CMSE_MPU_READWRITE);
+    if (!sig_chk) return M9_NEG_PTR;
+    // Curve is fixed to Ed25519 here; the privval protocol on both
+    // Cosmos and Gno chains uses Ed25519 only. cmse_nonsecure_entry's
+    // 4-register limit forced dropping the curve arg.
+    return os_crypto_sign(OS_CURVE_ED25519, path, data, data_len, out_sig);
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_sign_sc_challenge(uint8_t curve, const char *path,
+                        const uint8_t challenge[32], uint8_t out_sig[64]) {
+    if (!path || !challenge || !out_sig) return M9_NEG_PTR;
+    const void *path_chk = cmse_check_address_range(
+        (void *)path, 1, CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!path_chk) return M9_NEG_PTR;
+    const void *chal_chk = cmse_check_address_range(
+        (void *)challenge, 32, CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!chal_chk) return M9_NEG_PTR;
+    const void *sig_chk = cmse_check_address_range(
+        out_sig, 64, CMSE_NONSECURE | CMSE_MPU_READWRITE);
+    if (!sig_chk) return M9_NEG_PTR;
+    // Length-locked to 32 bytes here: this veneer cannot be turned into
+    // a general-purpose signing oracle. Privval canonical sign-bytes
+    // (variable length) route through Phase 2c3's s_sign_and_advance.
+    return os_crypto_sign((os_curve_t)curve, path, challenge, 32, out_sig);
 }
 
 __attribute__((cmse_nonsecure_entry))
