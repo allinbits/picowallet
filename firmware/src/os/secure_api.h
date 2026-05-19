@@ -116,22 +116,55 @@ void s_hwm_wipe(void);
 // --- Trusted UI primitives ----------------------------------------------
 
 // Show the factory-reset confirm screen. The screen is drawn by Secure
-// directly to the reserved prompt region of the e-paper -- NS cannot
-// influence what is shown. Buttons are polled Secure-side. On accept
-// the wipe runs (chain config + HWM). Returns true iff confirmed.
+// directly to the e-paper -- NS cannot influence the body text (it is
+// baked into the Secure image). Buttons are polled Secure-side via the
+// veneered input path. On accept Secure runs the wipe (chain config +
+// HWM) and returns true. NS calls this from factory_reset.c after its
+// long-hold trigger detector fires.
 bool s_factory_reset_with_consent(void);
 
-// --- Display + input (low-trust veneers) --------------------------------
+// --- Display (Phase 2d) -------------------------------------------------
+//
+// The e-paper SPI, framebuffer, Pico_ePaper_Code library, and all UI
+// layout code (splash, console, mode_select, confirm) live in the
+// Secure image. NS reaches them only through these veneers. NS does
+// NOT have a paint API -- it can push text into a Secure-side history
+// buffer (s_console_log) or request one of the canned screens.
+//
+// The framebuffer never appears in NS memory; Phase 4 closes
+// ACCESSCTRL_SPI1 + GPIO_NSMASK bits 8..13 (e-paper pins) to fully
+// take the display path away from NS.
 
-// Render the console area of the e-paper. NS supplies text content;
-// Secure refuses to draw if a trusted prompt is currently active.
-// `lines` is an array of NUL-terminated strings.
-void s_console_render_lines(const char * const *lines, size_t n);
+// Bring up SPI + e-paper panel + allocate the framebuffer. Called once
+// at boot from NS main() before any other display veneer.
+void s_display_init(void);
+
+// Render the boot splash (PicoWallet bitmap + build string). Build
+// version is baked into the Secure image; NS cannot influence it.
+void s_splash_render(void);
+
+// Console history (lives in Secure RAM).
+void s_console_init(void);
+void s_console_clear_history(void);
+// Push one text line into the history buffer. `len` is strlen(line)+1
+// (inclusive of NUL) and is capped Secure-side at the configured max.
+// Secure validates the NS range before reading.
+void s_console_log(const char *line, size_t len);
+bool s_console_is_dirty(void);
+void s_console_render(void);        // fast refresh
+void s_console_render_clean(void);  // multi-pass clean refresh (removes ghosting)
+
+// Show the mode-select prompt, block on a button press, return the
+// chosen mode (os_mode_t: 0 = TMKMS, 1 = PRIVVAL).
+uint8_t s_mode_select_prompt(void);
+
+// --- Input (low-trust veneer) -------------------------------------------
 
 // Sample button state. NS uses this for non-consent decisions only:
-// the boot-mode-select prompt, the factory-reset trigger detection.
-// NEVER use for confirming a destructive op -- those route through
-// s_factory_reset_with_consent or the equivalent Secure-drawn flow.
+// the boot-mode-select prompt's polling fallback, the factory-reset
+// trigger detection. NEVER use for confirming a destructive op -- those
+// route through s_factory_reset_with_consent or the equivalent
+// Secure-drawn flow.
 // btn: 0 = LEFT (GPIO 16), 1 = RIGHT (GPIO 17).
 bool s_input_pressed(uint8_t btn);
 

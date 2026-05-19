@@ -8,6 +8,8 @@
 # Included from firmware/CMakeLists.txt only when PICOWALLET_TRUSTZONE
 # is ON. The PICOWALLET_TRUSTZONE=OFF (default) build path is unchanged.
 
+set(WS_LIB ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/Pico_ePaper_Code/c/lib)
+
 add_executable(picowallet_secure
     secure_stub.c
     veneers.c
@@ -25,11 +27,40 @@ add_executable(picowallet_secure
     # Phase 2b flash veneers, so the two caches stay convergent.
     ../src/os/storage/chains.c
     ../src/os/storage/hwm_flash.c
+    # Phase 2d (display): SPI1, e-paper panel, framebuffer, Pico_ePaper_Code
+    # library and all UI layout code (splash, console, mode_select,
+    # confirm, factory-reset confirm) live in the Secure image. NS calls
+    # these via the s_display_* / s_console_* / s_splash_* / s_mode_select_*
+    # / s_factory_reset_with_consent veneers in veneers.c. The shared .c
+    # files use #if PICOWALLET_SECURE_BUILD to switch between the NS thin
+    # shim (compiled into picowallet) and the real implementation
+    # (compiled here).
+    ../src/os/hal/display.c
+    ../src/os/hal/input.c
+    ../src/os/ui/splash.c
+    ../src/os/ui/console.c
+    ../src/os/ui/mode_select.c
+    ../src/os/ui/confirm.c
+    ../src/os/ui/factory_reset.c
+    # Tiny os_console_log -> console_log wrapper (single function).
+    ../src/os/api.c
+    ${WS_LIB}/Config/DEV_Config.c
+    ${WS_LIB}/e-Paper/EPD_3in7.c
+    ${WS_LIB}/GUI/GUI_Paint.c
+    ${WS_LIB}/Fonts/font24.c
+    ${WS_LIB}/Fonts/font20.c
+    ${WS_LIB}/Fonts/font16.c
+    ${WS_LIB}/Fonts/font12.c
+    ${WS_LIB}/Fonts/font8.c
 )
 
 target_include_directories(picowallet_secure PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}     # for layout.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../src   # for os/secure_api.h, os/api.h, os/crypto/*
+    ${WS_LIB}/Config
+    ${WS_LIB}/e-Paper
+    ${WS_LIB}/GUI
+    ${WS_LIB}/Fonts
 )
 
 # PICOWALLET_SECURE_BUILD=1 is defined ONLY for the Secure target. Use
@@ -65,6 +96,7 @@ target_link_libraries(picowallet_secure
     pico_bootrom   # reset_usb_boot fallback when the NS slot is empty
     hardware_flash # Phase 2b: flash_range_erase / flash_range_program
     hardware_sync  # Phase 2b: save_and_disable_interrupts around flash ops
+    hardware_spi   # Phase 2d: SPI1 to e-paper panel
 )
 
 pico_set_linker_script(picowallet_secure

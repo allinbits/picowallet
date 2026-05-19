@@ -1,7 +1,16 @@
+#include "os/ui/splash.h"
+
+#if PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD
+
+#include "os/secure_api.h"
+
+void splash_render(void) { s_splash_render(); }
+
+#else
+
 #include <stdint.h>
 #include <string.h>
 
-#include "os/ui/splash.h"
 #include "os/ui/splash_image.h"
 #include "os/hal/display.h"
 #include "os/version.h"
@@ -50,3 +59,5 @@ void splash_render(void) {
 
     display_render_clean();
 }
+
+#endif  // PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD

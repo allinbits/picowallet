@@ -30,9 +30,15 @@
 
 #include "os/api.h"
 #include "os/secure_api.h"
+#include "os/mode.h"
 #include "os/storage/chains.h"
 #include "os/storage/flash_layout.h"
 #include "os/storage/hwm_flash.h"
+#include "os/hal/display.h"
+#include "os/ui/splash.h"
+#include "os/ui/console.h"
+#include "os/ui/mode_select.h"
+#include "os/ui/factory_reset.h"
 
 // Phase 2c: signing veneers reach into Secure-side keystore.c which has
 // the seed + SLIP-10 + Ed25519 + SHA-512 (all compiled only into the
@@ -309,6 +315,86 @@ int s_sign_sc_challenge(uint8_t curve, const char *path,
     // a general-purpose signing oracle. Privval canonical sign-bytes
     // (variable length) route through Phase 2c3's s_sign_and_advance.
     return os_crypto_sign((os_curve_t)curve, path, challenge, 32, out_sig);
+}
+
+// --- Phase 2d: display + UI veneers ------------------------------------
+//
+// SPI1 + the e-paper panel + framebuffer + Pico_ePaper_Code library +
+// the UI layout code (splash, console, mode_select, confirm) all live
+// in the Secure image. NS holds no paint API and no framebuffer
+// pointer; it can only push text or request canned screens.
+//
+// Each veneer below either: forwards directly to a Secure-side
+// implementation (display_init, console_render, etc., compiled into
+// picowallet_secure with PICOWALLET_SECURE_BUILD=1), or validates an NS
+// pointer/length first.
+//
+// console_log is the only one with a variable-length NS input. We bound
+// it at S_CONSOLE_LOG_MAX so cmse_check_address_range has a definite
+// range; the underlying push_one truncates further to MAX_LINE_LEN.
+#define S_CONSOLE_LOG_MAX  256u
+
+__attribute__((cmse_nonsecure_entry))
+void s_display_init(void) {
+    display_init();
+}
+
+__attribute__((cmse_nonsecure_entry))
+void s_splash_render(void) {
+    splash_render();
+}
+
+__attribute__((cmse_nonsecure_entry))
+void s_console_init(void) {
+    console_init();
+}
+
+__attribute__((cmse_nonsecure_entry))
+void s_console_clear_history(void) {
+    console_clear_history();
+}
+
+__attribute__((cmse_nonsecure_entry))
+void s_console_log(const char *line, size_t len) {
+    if (!line || len == 0) return;
+    if (len > S_CONSOLE_LOG_MAX) len = S_CONSOLE_LOG_MAX;
+    const void *chk = cmse_check_address_range(
+        (void *)line, len, CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!chk) return;
+    // Copy locally + ensure NUL-terminated before handing to the
+    // Secure-side console which expects a C string. The NS-supplied
+    // string may not include a NUL within `len` (caller may pass
+    // strlen instead of strlen+1); we force one.
+    char local[S_CONSOLE_LOG_MAX];
+    memcpy(local, chk, len);
+    local[len < S_CONSOLE_LOG_MAX ? len : S_CONSOLE_LOG_MAX - 1] = '\0';
+    local[S_CONSOLE_LOG_MAX - 1] = '\0';
+    console_log(local);
+}
+
+__attribute__((cmse_nonsecure_entry))
+bool s_console_is_dirty(void) {
+    return console_is_dirty();
+}
+
+__attribute__((cmse_nonsecure_entry))
+void s_console_render(void) {
+    console_render();
+}
+
+__attribute__((cmse_nonsecure_entry))
+void s_console_render_clean(void) {
+    console_render_clean();
+}
+
+__attribute__((cmse_nonsecure_entry))
+uint8_t s_mode_select_prompt(void) {
+    return (uint8_t)mode_select_prompt();
+}
+
+__attribute__((cmse_nonsecure_entry))
+bool s_factory_reset_with_consent(void) {
+    return factory_reset_confirm();
 }
 
 __attribute__((cmse_nonsecure_entry))

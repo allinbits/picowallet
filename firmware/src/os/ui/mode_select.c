@@ -1,6 +1,17 @@
+#include "os/ui/mode_select.h"
+
+#if PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD
+
+#include "os/secure_api.h"
+
+os_mode_t mode_select_prompt(void) {
+    return (os_mode_t)s_mode_select_prompt();
+}
+
+#else
+
 #include <string.h>
 
-#include "os/ui/mode_select.h"
 #include "os/hal/display.h"
 #include "os/hal/input.h"
 #include "os/version.h"
@@ -51,3 +62,5 @@ os_mode_t mode_select_prompt(void) {
     int btn = input_wait_press();
     return (btn == INPUT_BTN_LEFT) ? OS_MODE_PRIVVAL : OS_MODE_TMKMS;
 }
+
+#endif  // PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD

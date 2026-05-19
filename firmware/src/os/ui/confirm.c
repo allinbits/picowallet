@@ -1,3 +1,5 @@
+#if !PICOWALLET_TRUSTZONE || PICOWALLET_SECURE_BUILD
+
 #include <stdio.h>
 #include <string.h>
 
@@ -87,3 +89,5 @@ os_confirm_t os_display_confirm(const char * const *screens, int n_screens) {
         }
     }
 }
+
+#endif  // !PICOWALLET_TRUSTZONE || PICOWALLET_SECURE_BUILD

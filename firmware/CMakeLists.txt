@@ -27,6 +27,34 @@ pico_sdk_init()
 
 set(WS_LIB ${CMAKE_CURRENT_LIST_DIR}/../third_party/Pico_ePaper_Code/c/lib)
 
+# Source layout
+#
+# - Under PICOWALLET_TRUSTZONE the display + UI + Pico_ePaper_Code library
+#   compile only into picowallet_secure. NS sees thin shim variants of
+#   display.c / splash.c / console.c / mode_select.c / factory_reset.c via
+#   the #if PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD pattern, plus
+#   confirm.c excluded entirely on the NS side.
+# - Without TZ the original single-image build keeps everything in this
+#   target.
+set(PICOWALLET_DISPLAY_SOURCES
+    src/os/hal/display.c
+    src/os/ui/console.c
+    src/os/ui/confirm.c
+    src/os/ui/factory_reset.c
+    src/os/ui/splash.c
+    src/os/ui/mode_select.c
+)
+set(PICOWALLET_DISPLAY_LIB_SOURCES
+    ${WS_LIB}/Config/DEV_Config.c
+    ${WS_LIB}/e-Paper/EPD_3in7.c
+    ${WS_LIB}/GUI/GUI_Paint.c
+    ${WS_LIB}/Fonts/font24.c
+    ${WS_LIB}/Fonts/font20.c
+    ${WS_LIB}/Fonts/font16.c
+    ${WS_LIB}/Fonts/font12.c
+    ${WS_LIB}/Fonts/font8.c
+)
+
 add_executable(picowallet
     # OS
     src/os/main.c
@@ -34,14 +62,9 @@ add_executable(picowallet
     src/os/app_registry.c
     src/os/bench.c
     src/os/mode.c
-    src/os/hal/display.c
     src/os/hal/input.c
     src/os/hal/usb_console.c
-    src/os/ui/console.c
-    src/os/ui/confirm.c
-    src/os/ui/factory_reset.c
-    src/os/ui/splash.c
-    src/os/ui/mode_select.c
+    ${PICOWALLET_DISPLAY_SOURCES}
     src/os/transport/host_protocol.c
     src/os/transport/usb.c
     src/os/transport/usb_descriptors.c
@@ -68,14 +91,6 @@ add_executable(picowallet
     src/apps/gnoland/secret_connection_gno.c
     src/apps/gnoland/sc_driver.c
     src/apps/gnoland/gno_privval.c
-    ${WS_LIB}/Config/DEV_Config.c
-    ${WS_LIB}/e-Paper/EPD_3in7.c
-    ${WS_LIB}/GUI/GUI_Paint.c
-    ${WS_LIB}/Fonts/font24.c
-    ${WS_LIB}/Fonts/font20.c
-    ${WS_LIB}/Fonts/font16.c
-    ${WS_LIB}/Fonts/font12.c
-    ${WS_LIB}/Fonts/font8.c
 )
 
 target_include_directories(picowallet PRIVATE
@@ -83,15 +98,10 @@ target_include_directories(picowallet PRIVATE
     src/os/transport          # tusb_config.h lives here
     # rndis_protocol.h, needed by TinyUSB's ECM/RNDIS driver
     ${PICO_SDK_PATH}/lib/tinyusb/lib/networking
-    ${WS_LIB}/Config
-    ${WS_LIB}/e-Paper
-    ${WS_LIB}/GUI
-    ${WS_LIB}/Fonts
 )
 
 target_link_libraries(picowallet
     pico_stdlib
-    hardware_spi
     hardware_flash
     tinyusb_device
     tinyusb_board
@@ -106,6 +116,19 @@ target_link_libraries(picowallet
     # Hardware TRNG-backed PRNG (RP2350)
     pico_rand
 )
+
+# Pre-TZ single-image build: keep the e-paper code in the same target.
+# Under TZ this lives in picowallet_secure instead (see m9/CMakeLists.txt).
+if(NOT PICOWALLET_TRUSTZONE)
+    target_sources(picowallet PRIVATE ${PICOWALLET_DISPLAY_LIB_SOURCES})
+    target_include_directories(picowallet PRIVATE
+        ${WS_LIB}/Config
+        ${WS_LIB}/e-Paper
+        ${WS_LIB}/GUI
+        ${WS_LIB}/Fonts
+    )
+    target_link_libraries(picowallet hardware_spi)
+endif()
 
 # We provide our own USB descriptors; do NOT enable SDK auto-CDC.
 pico_enable_stdio_usb(picowallet 0)

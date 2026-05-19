@@ -1,7 +1,26 @@
+#include "os/ui/console.h"
+
+#if PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD
+
+#include <string.h>
+
+#include "os/secure_api.h"
+
+void console_init(void)            { s_console_init(); }
+void console_clear_history(void)   { s_console_clear_history(); }
+void console_render(void)          { s_console_render(); }
+void console_render_clean(void)    { s_console_render_clean(); }
+bool console_is_dirty(void)        { return s_console_is_dirty(); }
+void console_log(const char *line) {
+    if (!line) return;
+    s_console_log(line, strlen(line) + 1);
+}
+
+#else
+
 #include <stdbool.h>
 #include <string.h>
 
-#include "os/ui/console.h"
 #include "os/hal/display.h"
 #include "os/version.h"
 
@@ -98,3 +117,5 @@ void console_render_clean(void) {
     display_render_clean();
     dirty = false;
 }
+
+#endif  // PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD

@@ -2,7 +2,7 @@
 
 #include "pico/stdlib.h"
 
-#if PICOWALLET_TRUSTZONE
+#if PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD
 #include "os/secure_api.h"
 #endif
 
@@ -20,12 +20,14 @@ void input_init(void) {
 }
 
 bool input_pressed(int btn) {
-#if PICOWALLET_TRUSTZONE
-    // Route through the Secure veneer so Phase 4 can clear GPIO_NSMASK
-    // bits 16/17 (taking pad-config rights away from NS) without
-    // breaking the read path.
+#if PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD
+    // NS side under TZ: route through the Secure veneer so Phase 4
+    // can clear GPIO_NSMASK bits 16/17 (taking pad-config rights away
+    // from NS) without breaking the read path.
     return s_input_pressed((uint8_t)btn);
 #else
+    // Direct read: pre-TZ single-image build OR Secure side under TZ
+    // (where Secure owns the pad and reads SIO directly anyway).
     int pin = (btn == INPUT_BTN_LEFT) ? BTN_LEFT_PIN : BTN_RIGHT_PIN;
     return !gpio_get(pin);
 #endif

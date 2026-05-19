@@ -1,7 +1,25 @@
+#include "os/hal/display.h"
+
+#if PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD
+
+// NS build under M9 TrustZone -- SPI1, the e-paper panel, the framebuffer
+// and the Pico_ePaper_Code library all live in the Secure image. NS just
+// forwards through the veneers; no paint API is exposed on this side.
+
+#include "os/secure_api.h"
+
+void display_init(void)         { s_display_init(); }
+void display_clear(void)        { /* unused on NS under TZ -- canned screens only */ }
+void display_render_full(void)  { /* unused on NS under TZ */ }
+void display_render_clean(void) { /* unused on NS under TZ */ }
+
+#else
+
+// Secure build (M9 PICOWALLET_SECURE_BUILD=1) OR pre-TZ single-image build.
+// Both paths drive the panel directly.
+
 #include <stdlib.h>
 #include <string.h>
-
-#include "os/hal/display.h"
 
 #include "DEV_Config.h"
 #include "EPD_3in7.h"
@@ -51,3 +69,5 @@ void display_render_clean(void) {
     memcpy(framebuffer, swap_buf, framebuffer_size);
     EPD_3IN7_1Gray_Display(framebuffer);
 }
+
+#endif  // PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD
