@@ -132,7 +132,8 @@ void s_console_render_lines(const char * const *lines, size_t n);
 // the boot-mode-select prompt, the factory-reset trigger detection.
 // NEVER use for confirming a destructive op -- those route through
 // s_factory_reset_with_consent or the equivalent Secure-drawn flow.
-bool s_input_pressed(uint8_t btn);   // 0 = LEFT, 1 = RIGHT
+// btn: 0 = LEFT (GPIO 16), 1 = RIGHT (GPIO 17).
+bool s_input_pressed(uint8_t btn);
 
 // --- Utility ------------------------------------------------------------
 

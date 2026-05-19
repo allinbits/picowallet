@@ -2,6 +2,10 @@
 
 #include "pico/stdlib.h"
 
+#if PICOWALLET_TRUSTZONE
+#include "os/secure_api.h"
+#endif
+
 #define BTN_LEFT_PIN  16
 #define BTN_RIGHT_PIN 17
 
@@ -16,8 +20,15 @@ void input_init(void) {
 }
 
 bool input_pressed(int btn) {
+#if PICOWALLET_TRUSTZONE
+    // Route through the Secure veneer so Phase 4 can clear GPIO_NSMASK
+    // bits 16/17 (taking pad-config rights away from NS) without
+    // breaking the read path.
+    return s_input_pressed((uint8_t)btn);
+#else
     int pin = (btn == INPUT_BTN_LEFT) ? BTN_LEFT_PIN : BTN_RIGHT_PIN;
     return !gpio_get(pin);
+#endif
 }
 
 int input_wait_press(void) {

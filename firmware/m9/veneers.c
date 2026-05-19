@@ -163,6 +163,25 @@ static uint32_t m9_trng_word(void) {
     return s_trng_buf[s_trng_pos++];
 }
 
+// --- Phase 2d: trusted input -------------------------------------------
+//
+// Read button state via Secure-side GPIO. Buttons are GPIO 16 (LEFT) and
+// 17 (RIGHT), wired with internal pull-ups -- active-low. The SIO
+// GPIO_IN register at 0xD0000004 reflects the pad regardless of who
+// configured the pin function, so this veneer works even after Phase 4
+// clears GPIO_NSMASK bits 16/17 to take the pad config away from NS.
+//
+// Returns true if the button is currently held.
+__attribute__((cmse_nonsecure_entry))
+bool s_input_pressed(uint8_t btn) {
+    uint32_t pin;
+    if (btn == 0u) pin = 16u;       // INPUT_BTN_LEFT
+    else if (btn == 1u) pin = 17u;  // INPUT_BTN_RIGHT
+    else return false;
+    uint32_t in = *(volatile uint32_t *)0xD0000004u;  // SIO_GPIO_IN
+    return (in & (1u << pin)) == 0u;
+}
+
 __attribute__((cmse_nonsecure_entry))
 int s_random(uint8_t *out, size_t n) {
     if (!out || n == 0) return M9_NEG_PTR;
