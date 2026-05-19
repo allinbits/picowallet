@@ -5,6 +5,10 @@
 #include "pico/stdlib.h"
 #include "tusb.h"
 
+#if PICOWALLET_TRUSTZONE
+#include "hardware/dma.h"
+#endif
+
 #include "os/hal/display.h"
 #include "os/hal/input.h"
 #include "os/hal/usb_console.h"
@@ -39,6 +43,13 @@ int main(void) {
     gpio_set_dir(LED_PIN, GPIO_OUT);
 
 #if PICOWALLET_TRUSTZONE
+    // Phase 4 DMA partition: the Secure stub LOCKed channel 0 as
+    // Secure-only via DMA_SECCFG_CH0. Reserve the same channel in NS's
+    // SDK bitmap so dma_claim_unused_channel (e.g. inside pico_sha256)
+    // skips it -- otherwise NS would hand out channel 0 and silently
+    // RAZ/WI on any write to the channel's CTRL_TRIG.
+    dma_channel_claim(0);
+
     // Phase 2a smoke-test: cross the NS->S boundary once before doing
     // anything else. If the veneer round-trips correctly, the SG path
     // and the implib link both worked.

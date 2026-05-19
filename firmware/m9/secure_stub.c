@@ -257,6 +257,24 @@ static void m9_accessctrl_open_for_ns(void) {
     r[0xC8 / 4u] = PW | 0xFCu;   // ACCESSCTRL_ROSC
     r[0xCC / 4u] = PW | 0xFCu;   // ACCESSCTRL_PLL_SYS
     r[0xD0 / 4u] = PW | 0xFCu;   // ACCESSCTRL_PLL_USB
+
+    // DMA channel partition. ACCESSCTRL_DMA stays open to NS (NS still
+    // uses dma for pico_sha256 until task #22 ships); per-channel
+    // SECCFG_CHn is the finer-grained gate. Reserve channel 0 for the
+    // Secure side (future SHA / SPI / flash users) by setting
+    // SECCFG_CH0 = S=1 + P=1 + LOCK=1 -- once LOCK is set the
+    // attribution cannot be modified until reset, so NS cannot
+    // re-attribute the channel even if ACCESSCTRL_DMA is open.
+    // Channels 1..15 remain at their reset value (S=1, P=1, LOCK=0):
+    // NS today writes them and the controller honors the writes
+    // because ACCESSCTRL_DMA grants NS, but the LOCK=0 means we can
+    // tighten this further in a later commit without a chip change.
+    //
+    // NS-side bookkeeping (dma_channel_claim(0) in main.c) marks
+    // channel 0 as claimed in NS's SDK bitmap so pico_sha256's
+    // dma_claim_unused_channel scan skips it.
+    volatile uint32_t *dma_seccfg = (volatile uint32_t *)(0x50000000u + 0x480u);
+    dma_seccfg[0] = (1u << 1) | (1u << 0) | (1u << 2);  // S=1, P=1, LOCK=1
     __asm__ volatile("dsb");
 }
 
