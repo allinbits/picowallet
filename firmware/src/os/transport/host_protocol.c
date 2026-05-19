@@ -19,6 +19,10 @@
 #include "os/storage/hwm_flash.h"
 #include "os/ui/factory_reset.h"
 
+#if PICOWALLET_TRUSTZONE
+#include "os/secure_api.h"
+#endif
+
 #define LED_PIN PICO_DEFAULT_LED_PIN
 #define REPLY_BUF 160
 
@@ -96,6 +100,9 @@ void host_protocol_print_help(void) {
     usb_cdc_printf("  sign <curve> <path> <hex_data>         sign raw bytes\r\n");
 #endif
     usb_cdc_printf("  bench ed25519                          on-device sign+verify benchmark\r\n");
+#if PICOWALLET_TRUSTZONE
+    usb_cdc_printf("  seal_selftest <pin>                    M9.5 seal/unseal smoke test (4-16 chars)\r\n");
+#endif
     usb_cdc_printf("  cosmos.chain.add <label> <chain_id> <host> <port> [<pubkey_hex>]\r\n");
     usb_cdc_printf("  cosmos.chain.remove <label>\r\n");
     usb_cdc_printf("  cosmos.chain.list\r\n");
@@ -480,6 +487,26 @@ static int dispatch_os(const char *cmd, const char *args,
         return 0;
     }
 #endif  // !PICOWALLET_TRUSTZONE
+#if PICOWALLET_TRUSTZONE
+    if (strcmp(cmd, "seal_selftest") == 0) {
+        // Phase 7.1 smoke test. Operator types a PIN (4-16 chars) and
+        // the Secure side round-trips a random 64-byte payload through
+        // seal/unseal + verifies wrong-PIN rejection. NS never sees the
+        // payload or the derived KEK.
+        size_t pin_len = strlen(args);
+        if (pin_len < 4 || pin_len > 16) {
+            snprintf(reply, reply_size, "usage: os.seal_selftest <pin 4-16 chars>");
+            return -1;
+        }
+        int rc = s_seal_selftest((const uint8_t *)args, pin_len);
+        if (rc == 0) {
+            snprintf(reply, reply_size, "ok: seal/unseal round-trip + wrong-PIN reject");
+            return 0;
+        }
+        snprintf(reply, reply_size, "FAIL rc=%d", rc);
+        return -1;
+    }
+#endif
     if (strcmp(cmd, "bench") == 0) {
         if (strcmp(args, "ed25519") == 0) {
             return bench_ed25519(reply, reply_size);

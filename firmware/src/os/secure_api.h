@@ -199,4 +199,21 @@ int s_hkdf_expand(const s_hkdf_expand_args_t *args);
 // truncated to uint8_t.
 uint32_t s_clock_get_hz(uint8_t clock_idx);
 
+// --- Phase 7.1 self-test ------------------------------------------------
+//
+// Round-trip the seal/unseal primitives entirely in Secure RAM. NS
+// passes a PIN; Secure generates a random 64-byte payload, seals it
+// under the PIN, unseals it (verifying tag), then unseals again with
+// a deliberately wrong PIN and verifies the tag check rejects it.
+//
+// Return codes:
+//    0    success: round-trip matched and wrong-PIN rejected
+//   -1    seal failed
+//   -2    unseal-with-correct-PIN failed (tag mismatch unexpectedly)
+//   -3    unseal-with-correct-PIN produced wrong plaintext (KDF/AEAD bug)
+//   -4    unseal-with-wrong-PIN unexpectedly succeeded (BIG ALARM)
+//   -101  invalid NS pointer (cmse range check failed)
+//   -102  PIN length out of range
+int s_seal_selftest(const uint8_t *pin, size_t pin_len);
+
 const char *s_status_str(int status);

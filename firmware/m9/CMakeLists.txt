@@ -13,6 +13,9 @@ set(WS_LIB ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/Pico_ePaper_Code/c/lib)
 add_executable(picowallet_secure
     secure_stub.c
     veneers.c
+    trng.c
+    # Phase 7.1: PIN-sealed master-seed primitives (Argon2id + AEAD).
+    ../src/os/storage/seed_flash.c
     # Phase 2c: keystore + Ed25519/SHA-512 move from NS to Secure. The seed
     # (TEST_SEED today; encrypted-and-PIN-unlocked in M9.5) and the
     # signing routines never appear in NS flash. NS reaches them only via

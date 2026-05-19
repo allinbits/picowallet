@@ -43,6 +43,8 @@
 #include "hardware/clocks.h"
 
 #include "os/crypto/sha256.h"
+#include "os/crypto/monocypher.h"
+#include "os/storage/seed_flash.h"
 
 // Phase 2c: signing veneers reach into Secure-side keystore.c which has
 // the seed + SLIP-10 + Ed25519 + SHA-512 (all compiled only into the
@@ -141,37 +143,11 @@ int s_flash_erase_hwm_all(void) {
 
 // --- Phase 2e: TRNG access ---------------------------------------------
 //
-// The RP2350 TRNG sits at 0x400F0000. ACCESSCTRL_TRNG is opened to NS in
-// Phase 1 (closed back to Secure-only in Phase 4), but we route random
-// reads through this veneer anyway so the entropy path stays anchored
-// in Secure once Phase 4 lands. The hardware emits 192 bits per cycle
-// across EHR_DATA0..5; we cache the unused words between calls.
-#define TRNG_BASE_S            0x400F0000u
-#define TRNG_RND_SOURCE_ENABLE (*(volatile uint32_t *)(TRNG_BASE_S + 0x12Cu))
-#define TRNG_TRNG_VALID        (*(volatile uint32_t *)(TRNG_BASE_S + 0x110u))
-#define TRNG_RNG_ICR           (*(volatile uint32_t *)(TRNG_BASE_S + 0x108u))
-#define TRNG_EHR_DATA0_ADDR    ((volatile uint32_t *)(TRNG_BASE_S + 0x114u))
-
-static uint32_t s_trng_buf[6];
-static uint32_t s_trng_pos = 6;
-static bool     s_trng_enabled = false;
-
-static uint32_t m9_trng_word(void) {
-    if (!s_trng_enabled) {
-        TRNG_RND_SOURCE_ENABLE = 1u;
-        s_trng_enabled = true;
-    }
-    if (s_trng_pos >= 6u) {
-        while (!(TRNG_TRNG_VALID & 1u)) { /* spin until 192 bits ready */ }
-        for (int i = 0; i < 6; i++) s_trng_buf[i] = TRNG_EHR_DATA0_ADDR[i];
-        // Writing 1 to RNG_ICR's interrupt bits clears VALID so the next
-        // batch starts collecting. The 0x3F mask covers all six EHR_*
-        // valid-ready bits the bootrom uses; harmless to write spares.
-        TRNG_RNG_ICR = 0x3Fu;
-        s_trng_pos = 0;
-    }
-    return s_trng_buf[s_trng_pos++];
-}
+// The RP2350 TRNG sits at 0x400F0000 (Secure-only after Phase 4). NS
+// routes random reads through s_random; the underlying word fetcher is
+// in firmware/m9/trng.c so the seed-sealing path (seed_flash.c) can
+// share it.
+#include "trng.h"
 
 // --- Phase 2d: trusted input -------------------------------------------
 //
@@ -199,20 +175,7 @@ int s_random(uint8_t *out, size_t n) {
     const void *out_chk = cmse_check_address_range(
         out, n, CMSE_NONSECURE | CMSE_MPU_READWRITE);
     if (!out_chk) return M9_NEG_PTR;
-    uint8_t *p = (uint8_t *)out_chk;
-    size_t i = 0;
-    while (i + 4u <= n) {
-        uint32_t w = m9_trng_word();
-        p[i + 0] = (uint8_t)(w);
-        p[i + 1] = (uint8_t)(w >> 8);
-        p[i + 2] = (uint8_t)(w >> 16);
-        p[i + 3] = (uint8_t)(w >> 24);
-        i += 4;
-    }
-    if (i < n) {
-        uint32_t w = m9_trng_word();
-        for (size_t j = 0; j < n - i; j++) p[i + j] = (uint8_t)(w >> (8 * j));
-    }
+    m9_trng_fill((uint8_t *)out_chk, n);
     return 0;
 }
 
@@ -425,6 +388,53 @@ int s_hkdf_extract(const s_hkdf_extract_args_t *args) {
                                   CMSE_NONSECURE | CMSE_MPU_READWRITE)) return M9_NEG_PTR;
 
     hkdf_extract(v.salt, v.salt_len, v.ikm, v.ikm_len, v.prk);
+    return 0;
+}
+
+// --- Phase 7.1: seal/unseal self-test veneer ----------------------------
+//
+// Bounded NS-visible smoke test for m9_seal_seed / m9_unseal_seed.
+// Generates a random 64-byte payload in Secure, seals + unseals with
+// the NS-supplied PIN, then re-unseals with a tampered PIN to confirm
+// the AEAD tag check fails closed. Mostly there so we can run a
+// boot-time sanity check from the TMKMS REPL before relying on the
+// primitives for the PIN flow in 7.2.
+#define M9_PIN_MIN_LEN 4u
+#define M9_PIN_MAX_LEN 16u
+
+__attribute__((cmse_nonsecure_entry))
+int s_seal_selftest(const uint8_t *pin, size_t pin_len) {
+    if (!pin) return M9_NEG_PTR;
+    if (pin_len < M9_PIN_MIN_LEN || pin_len > M9_PIN_MAX_LEN) return -102;
+    const void *pin_chk = cmse_check_address_range(
+        (void *)pin, pin_len, CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!pin_chk) return M9_NEG_PTR;
+
+    // Snapshot the PIN to a local buffer so a TOCTOU race from NS
+    // can't change it mid-test.
+    uint8_t pin_buf[M9_PIN_MAX_LEN];
+    memcpy(pin_buf, pin_chk, pin_len);
+
+    uint8_t plaintext[M9_SEALED_SEED_LEN];
+    m9_trng_fill(plaintext, sizeof(plaintext));
+
+    m9_sealed_seed_t blob;
+    if (m9_seal_seed(pin_buf, pin_len, plaintext, &blob) != 0) return -1;
+
+    uint8_t round_trip[M9_SEALED_SEED_LEN];
+    if (m9_unseal_seed(pin_buf, pin_len, &blob, round_trip) != 0) return -2;
+    if (memcmp(round_trip, plaintext, sizeof(plaintext)) != 0) return -3;
+
+    // Flip one bit in the PIN and confirm unseal rejects.
+    pin_buf[0] ^= 0x01u;
+    if (m9_unseal_seed(pin_buf, pin_len, &blob, round_trip) == 0) return -4;
+
+    // Wipe transient data before returning.
+    pin_buf[0] ^= 0x01u;  // restore (cosmetic; we wipe right after)
+    crypto_wipe(pin_buf, sizeof(pin_buf));
+    crypto_wipe(plaintext, sizeof(plaintext));
+    crypto_wipe(round_trip, sizeof(round_trip));
+    crypto_wipe(&blob, sizeof(blob));
     return 0;
 }
 
