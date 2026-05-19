@@ -192,6 +192,18 @@ static void m9_accessctrl_open_for_ns(void) {
     for (uint32_t off = 0x14u; off <= 0xE4u; off += 4u) {
         r[off / 4u] = PW | 0xFFu;
     }
+
+    // --- Phase 4 partial lockdown -----------------------------------
+    // Re-narrow specific peripherals after the open-everything pass.
+    // Each register reads back as just the lower 8 bits; writing
+    // 0xACCE0000 | <new flags> updates only that peripheral. 0xFC =
+    // reset value: DBG + DMA + CORE1 + CORE0 + SP + SU set, NSP/NSU
+    // cleared (Secure-Privileged-only).
+    //
+    // TRNG: NS reaches the TRNG exclusively through the s_random()
+    // veneer (Phase 2e). Lock direct NS access so a future NS
+    // compromise can't measure raw entropy or replay it.
+    r[0xB4 / 4u] = PW | 0xFCu;   // ACCESSCTRL_TRNG
     __asm__ volatile("dsb");
 }
 

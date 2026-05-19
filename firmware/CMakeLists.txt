@@ -191,6 +191,12 @@ if(PICOWALLET_TRUSTZONE)
         # path for SC handshakes.
         PICO_RAND_SEED_ENTROPY_SRC_BOOT_RANDOM=0
         PICO_RAND_SEED_ENTROPY_SRC_BOARD_ID=0
+        # Phase 4 partial: ACCESSCTRL_TRNG locks the TRNG hardware to
+        # Secure-only, so pico_rand's TRNG sampler would fault. NS goes
+        # through the s_random() veneer (Phase 2e) for any real entropy
+        # needs; pico_rand's residual users (lwIP UDP source-port salt)
+        # fall back to ROSC drift + timer when the TRNG source is off.
+        PICO_RAND_ENTROPY_SRC_TRNG=0
     )
     add_subdirectory(m9)
     # Phase 2: NS image links against the import library that the Secure
