@@ -181,7 +181,17 @@ static void m9_accessctrl_open_for_ns(void) {
     // GPIO_NSMASK0/1 use all 32 bits for data so password can't fit at
     // the base; use the SET alias (this path is documented to work for
     // these registers and the SDK does it the same way).
-    rset[0x0C / 4u] = 0xFFFFFFFFu;
+    //
+    // GPIO_NSMASK0 covers pins 0..31. Bits 8..13 are the e-paper
+    // signals (DC, CS, CLK, MOSI, RST, BUSY) which Phase 2d moved
+    // fully into Secure; clearing those bits takes pad config rights
+    // away from NS so an NS compromise cannot reconfigure the
+    // pins (e.g. drive RST and corrupt the framebuffer mid-update or
+    // remap MOSI to capture writes). NS still owns:
+    //   - pin 16, 17  (LEFT/RIGHT buttons -- gpio_init runs in NS)
+    //   - pin 25      (onboard LED        -- main.c blink path)
+    // and all other pins for misc NS uses.
+    rset[0x0C / 4u] = 0xFFFFC0FFu;   // mask out pins 8..13 from NS
     rset[0x10 / 4u] = 0xFF00FFFFu;
 
     // Per-peripheral access registers from ROM (0x14) through XIP_QMI
@@ -204,6 +214,14 @@ static void m9_accessctrl_open_for_ns(void) {
     // veneer (Phase 2e). Lock direct NS access so a future NS
     // compromise can't measure raw entropy or replay it.
     r[0xB4 / 4u] = PW | 0xFCu;   // ACCESSCTRL_TRNG
+
+    // SPI1: drives the e-paper panel exclusively (Phase 2d moved the
+    // Pico_ePaper_Code library + framebuffer + display HAL into the
+    // Secure image). NS does not reference spi1 at all; lock it down.
+    // SPI0 stays open to NS (currently unused but available for future
+    // NS peripherals -- if it grows trust-sensitive uses it gets the
+    // same treatment).
+    r[0x94 / 4u] = PW | 0xFCu;   // ACCESSCTRL_SPI1
     __asm__ volatile("dsb");
 }
 
