@@ -82,11 +82,24 @@ int s_sign_privval(const char *path, const uint8_t *data, size_t data_len,
 //
 // Returns 0 on success; -1 if HWM rejected (replay/regression);
 // other negative codes for status_t failures.
-int s_sign_and_advance(os_curve_t curve, const char *path,
-                       uint8_t hwm_slot_idx,
-                       int32_t type, int64_t height, int32_t round,
-                       const uint8_t *data, size_t data_len,
-                       uint8_t out_sig[64]);
+//
+// All args packed into a struct because cmse_nonsecure_entry can pass
+// at most 4 register-sized args. The struct itself is read once from
+// NS memory (cmse_check_address_range), then its pointer fields are
+// individually validated.
+typedef struct {
+    const char    *path;       // SLIP-10 path, NUL-terminated (NS RAM)
+    const uint8_t *data;       // canonical sign-bytes (NS RAM)
+    size_t         data_len;
+    uint8_t       *out_sig;    // 64-byte output (NS RAM, writable)
+    uint8_t        hwm_slot_idx;
+    uint8_t        curve;      // os_curve_t, currently always Ed25519
+    int32_t        type;
+    int32_t        round;
+    int64_t        height;
+} s_sign_and_advance_args_t;
+
+int s_sign_and_advance(const s_sign_and_advance_args_t *args);
 
 // --- Chain config mutations ----------------------------------------------
 //

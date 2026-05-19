@@ -30,6 +30,12 @@
 
 #include "layout.h"
 
+// Phase 2c3: Secure-side caches for chain config + HWM. Populated from
+// flash by chains_init / hwm_init at boot; the s_sign_and_advance
+// veneer reads them when validating each privval sign request.
+#include "os/storage/chains.h"
+#include "os/storage/hwm_flash.h"
+
 // ---- Phase 1c diagnostic LED blink ---------------------------------------
 //
 // The Secure stub has no UART / USB / display to tell the operator what
@@ -307,6 +313,13 @@ static void m9_runtime_init_for_ns(void) {
 int main(void) {
     m9_runtime_init_for_ns();
     led_init();
+    // Phase 2c3: prime the Secure-side chain config + HWM caches from
+    // flash before BXNS so the s_sign_and_advance veneer can look up
+    // the slot's chain_id and current HWM without NS being able to
+    // influence the read. Both functions are idempotent and just scan
+    // their respective flash regions via XIP.
+    chains_init();
+    hwm_init();
     m9_sau_program();
     m9_accessctrl_open_for_ns();
     m9_branch_to_nonsecure();

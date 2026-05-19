@@ -14,6 +14,9 @@
 
 #include "apps/cosmos/privval.h"
 #include "os/api.h"
+#if PICOWALLET_TRUSTZONE
+#include "os/secure_api.h"
+#endif
 #include "os/crypto/keystore.h"
 #include "os/storage/hwm_flash.h"
 
@@ -614,17 +617,6 @@ static void handle_sign_vote(privval_state_t *st, privval_sink_t *sink,
         return;
     }
 
-    if (!hwm_advance(st->hwm_slot_idx, r.chain_id, strlen(r.chain_id),
-                     r.type, r.height, r.round)) {
-        snprintf(log, sizeof(log),
-                 "cosmos-sc[%s]: double_sign_refused %.20s t=%d h=%lld r=%d",
-                 st->slot_label, r.chain_id,
-                 (int)r.type, (long long)r.height, (int)r.round);
-        os_console_log(log);
-        send_error_in(sink, 4, 2, "double_sign_refused");
-        return;
-    }
-
     // Build canonical bytes
     uint8_t canon[400];
     size_t  canon_n = encode_canonical_vote(canon, &r);
@@ -635,10 +627,44 @@ static void handle_sign_vote(privval_state_t *st, privval_sink_t *sink,
     memcpy(sign_in + prefix_n, canon, canon_n);
     size_t  sign_in_len = prefix_n + canon_n;
 
-    // Ed25519 sign
+    // Ed25519 sign, atomically fused with HWM strict-advance under M9.
     uint8_t sig[64];
+#if PICOWALLET_TRUSTZONE
+    s_sign_and_advance_args_t sa_args = {
+        .path         = VALIDATOR_KEY_PATH,
+        .data         = sign_in,
+        .data_len     = sign_in_len,
+        .out_sig      = sig,
+        .hwm_slot_idx = st->hwm_slot_idx,
+        .curve        = OS_CURVE_ED25519,
+        .type         = r.type,
+        .round        = r.round,
+        .height       = r.height,
+    };
+    int rc = s_sign_and_advance(&sa_args);
+    if (rc == -1) {
+        snprintf(log, sizeof(log),
+                 "cosmos-sc[%s]: double_sign_refused %.20s t=%d h=%lld r=%d",
+                 st->slot_label, r.chain_id,
+                 (int)r.type, (long long)r.height, (int)r.round);
+        os_console_log(log);
+        send_error_in(sink, 4, 2, "double_sign_refused");
+        return;
+    }
+#else
+    if (!hwm_advance(st->hwm_slot_idx, r.chain_id, strlen(r.chain_id),
+                     r.type, r.height, r.round)) {
+        snprintf(log, sizeof(log),
+                 "cosmos-sc[%s]: double_sign_refused %.20s t=%d h=%lld r=%d",
+                 st->slot_label, r.chain_id,
+                 (int)r.type, (long long)r.height, (int)r.round);
+        os_console_log(log);
+        send_error_in(sink, 4, 2, "double_sign_refused");
+        return;
+    }
     int rc = os_crypto_sign(OS_CURVE_ED25519, VALIDATOR_KEY_PATH,
                             sign_in, sign_in_len, sig);
+#endif
     if (rc != 0) {
         snprintf(log, sizeof(log), "cosmos-sc[%s]: sign failed", st->slot_label);
         os_console_log(log);
@@ -694,6 +720,38 @@ static void handle_sign_proposal(privval_state_t *st, privval_sink_t *sink,
         return;
     }
 
+    uint8_t canon[400];
+    size_t  canon_n = encode_canonical_proposal(canon, &r);
+
+    uint8_t sign_in[412];
+    size_t  prefix_n = pb_write_varint(sign_in, (uint64_t)canon_n);
+    memcpy(sign_in + prefix_n, canon, canon_n);
+    size_t  sign_in_len = prefix_n + canon_n;
+
+    uint8_t sig[64];
+#if PICOWALLET_TRUSTZONE
+    s_sign_and_advance_args_t sa_args = {
+        .path         = VALIDATOR_KEY_PATH,
+        .data         = sign_in,
+        .data_len     = sign_in_len,
+        .out_sig      = sig,
+        .hwm_slot_idx = st->hwm_slot_idx,
+        .curve        = OS_CURVE_ED25519,
+        .type         = r.type,
+        .round        = r.round,
+        .height       = r.height,
+    };
+    int rc = s_sign_and_advance(&sa_args);
+    if (rc == -1) {
+        snprintf(log, sizeof(log),
+                 "cosmos-sc[%s]: double_sign_refused %.20s t=%d h=%lld r=%d",
+                 st->slot_label, r.chain_id,
+                 (int)r.type, (long long)r.height, (int)r.round);
+        os_console_log(log);
+        send_error_in(sink, 6, 2, "double_sign_refused");
+        return;
+    }
+#else
     if (!hwm_advance(st->hwm_slot_idx, r.chain_id, strlen(r.chain_id),
                      r.type, r.height, r.round)) {
         snprintf(log, sizeof(log),
@@ -704,18 +762,9 @@ static void handle_sign_proposal(privval_state_t *st, privval_sink_t *sink,
         send_error_in(sink, 6, 2, "double_sign_refused");
         return;
     }
-
-    uint8_t canon[400];
-    size_t  canon_n = encode_canonical_proposal(canon, &r);
-
-    uint8_t sign_in[412];
-    size_t  prefix_n = pb_write_varint(sign_in, (uint64_t)canon_n);
-    memcpy(sign_in + prefix_n, canon, canon_n);
-    size_t  sign_in_len = prefix_n + canon_n;
-
-    uint8_t sig[64];
     int rc = os_crypto_sign(OS_CURVE_ED25519, VALIDATOR_KEY_PATH,
                             sign_in, sign_in_len, sig);
+#endif
     if (rc != 0) {
         snprintf(log, sizeof(log), "cosmos-sc[%s]: sign failed", st->slot_label);
         os_console_log(log);

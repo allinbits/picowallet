@@ -30,7 +30,9 @@
 
 #include "os/api.h"
 #include "os/secure_api.h"
+#include "os/storage/chains.h"
 #include "os/storage/flash_layout.h"
+#include "os/storage/hwm_flash.h"
 
 // Phase 2c: signing veneers reach into Secure-side keystore.c which has
 // the seed + SLIP-10 + Ed25519 + SHA-512 (all compiled only into the
@@ -196,6 +198,59 @@ int s_get_pubkey(uint8_t curve, const char *path, uint8_t out_pubkey[32]) {
     if (!out_chk) return M9_NEG_PTR;
     size_t out_len = 0;
     return os_crypto_get_pubkey((os_curve_t)curve, path, out_pubkey, 32, &out_len);
+}
+
+// Phase 2c3: fused HWM-check + sign. Secure looks up the slot's chain_id
+// from the Secure-side chain config cache so NS can't lie about which
+// chain it's signing for. If HWM strict-advance succeeds the new record
+// is persisted before the signature is generated; if it fails the
+// signature is never computed.
+//
+// Return codes: 0 success; -1 HWM rejected; -2 slot not configured;
+// other negative codes from os_crypto_sign / pointer validation.
+__attribute__((cmse_nonsecure_entry))
+int s_sign_and_advance(const s_sign_and_advance_args_t *args) {
+    if (!args) return M9_NEG_PTR;
+    const s_sign_and_advance_args_t *a = cmse_check_address_range(
+        (void *)args, sizeof(*args), CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!a) return M9_NEG_PTR;
+    // Copy out so we touch each field exactly once (NS could TOCTOU on
+    // a shared struct).
+    s_sign_and_advance_args_t v = *a;
+    if (!v.path || !v.data || !v.out_sig) return M9_NEG_PTR;
+    if (v.data_len == 0 || v.data_len > 4096u) return M9_NEG_RANGE;
+    if (v.hwm_slot_idx >= HWM_TOTAL_SLOTS) return M9_NEG_RANGE;
+    if (!cmse_check_address_range((void *)v.path, 1,
+                                  CMSE_NONSECURE | CMSE_MPU_READ)) return M9_NEG_PTR;
+    if (!cmse_check_address_range((void *)v.data, v.data_len,
+                                  CMSE_NONSECURE | CMSE_MPU_READ)) return M9_NEG_PTR;
+    if (!cmse_check_address_range(v.out_sig, 64,
+                                  CMSE_NONSECURE | CMSE_MPU_READWRITE)) return M9_NEG_PTR;
+
+    // Look up the chain config slot for this HWM index. The mapping is
+    // cosmos[0..7] -> hwm 0..7, gno[0..7] -> hwm 8..15.
+    chains_family_t fam   = (v.hwm_slot_idx < 8u) ? CHAINS_FAMILY_COSMOS : CHAINS_FAMILY_GNO;
+    size_t          slot  = (v.hwm_slot_idx < 8u) ? v.hwm_slot_idx
+                                                  : (size_t)(v.hwm_slot_idx - 8u);
+    const chain_slot_t *cs = chains_get(fam, slot);
+    if (!cs || !cs->in_use) return -2;
+
+    // HWM strict-advance using the slot's chain_id (Secure's truth).
+    // chain_id strlen is bounded by CHAINS_CHAIN_ID_MAX, set at config-add.
+    size_t cid_len = 0;
+    while (cid_len < CHAINS_CHAIN_ID_MAX && cs->chain_id[cid_len] != '\0') cid_len++;
+    if (!hwm_advance(v.hwm_slot_idx, cs->chain_id, cid_len,
+                     v.type, v.height, v.round)) {
+        return -1;
+    }
+
+    // HWM accepted -- now sign. Per the M9.2 design these must be
+    // atomic from NS's perspective: if either step fails we still
+    // honor the HWM advance (the height is "used"), so a sign failure
+    // wedges this height for the slot but doesn't let NS retry-double-
+    // sign at the same height.
+    return os_crypto_sign((os_curve_t)v.curve, v.path,
+                          v.data, v.data_len, v.out_sig);
 }
 
 __attribute__((cmse_nonsecure_entry))

@@ -18,6 +18,13 @@ add_executable(picowallet_secure
     ../src/os/crypto/keystore.c
     ../src/os/crypto/monocypher-ed25519.c
     ../src/os/crypto/monocypher.c
+    # Phase 2c3: HWM cache + chain config also move to Secure so the
+    # HWM strict-advance check fuses with the sign in one veneer call
+    # (s_sign_and_advance). The NS-side copies of these are still
+    # compiled into picowallet but their write paths only run via the
+    # Phase 2b flash veneers, so the two caches stay convergent.
+    ../src/os/storage/chains.c
+    ../src/os/storage/hwm_flash.c
 )
 
 target_include_directories(picowallet_secure PRIVATE

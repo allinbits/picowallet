@@ -24,6 +24,9 @@
 #include "apps/gnoland/gno_privval.h"
 #include "os/api.h"
 #include "os/storage/hwm_flash.h"
+#if PICOWALLET_TRUSTZONE
+#include "os/secure_api.h"
+#endif
 #include "os/storage/chains.h"
 
 #define VALIDATOR_KEY_PATH "m/0'"
@@ -221,6 +224,38 @@ static int advance(gno_chain_t *c) {
                 if (!resp_len) return -1;
                 goto emit_response;
             }
+            uint8_t sig[64];
+#if PICOWALLET_TRUSTZONE
+            s_sign_and_advance_args_t sa_args = {
+                .path         = VALIDATOR_KEY_PATH,
+                .data         = sign_bytes,
+                .data_len     = sign_len,
+                .out_sig      = sig,
+                .hwm_slot_idx = c->hwm_slot_idx,
+                .curve        = OS_CURVE_ED25519,
+                .type         = type,
+                .round        = round,
+                .height       = height,
+            };
+            int sa_rc = s_sign_and_advance(&sa_args);
+            if (sa_rc == -1) {
+                char log[96];
+                int cid_show = (int)(chain_id_len > 20 ? 20 : chain_id_len);
+                snprintf(log, sizeof(log),
+                         "gno-sc[%s]: double_sign_refused %.*s t=%d h=%lld r=%d",
+                         label, cid_show, chain_id, (int)type,
+                         (long long)height, (int)round);
+                os_console_log(log);
+                resp_len = gno_privval_encode_sign_response_error(
+                    "double_sign_refused", resp_plain, sizeof(resp_plain));
+                if (!resp_len) return -1;
+                goto emit_response;
+            }
+            if (sa_rc != 0) {
+                os_console_log("gno-sc: s_sign_and_advance failed");
+                return -1;
+            }
+#else
             if (!hwm_advance(c->hwm_slot_idx, chain_id, chain_id_len,
                              type, height, round)) {
                 char log[96];
@@ -235,12 +270,12 @@ static int advance(gno_chain_t *c) {
                 if (!resp_len) return -1;
                 goto emit_response;
             }
-            uint8_t sig[64];
             if (os_crypto_sign(OS_CURVE_ED25519, VALIDATOR_KEY_PATH,
                                sign_bytes, sign_len, sig) != 0) {
                 os_console_log("gno-sc: os_crypto_sign failed");
                 return -1;
             }
+#endif
             resp_len = gno_privval_encode_sign_response(
                 sig, resp_plain, sizeof(resp_plain));
             if (!resp_len) {
