@@ -199,6 +199,35 @@ int s_hkdf_expand(const s_hkdf_expand_args_t *args);
 // truncated to uint8_t.
 uint32_t s_clock_get_hz(uint8_t clock_idx);
 
+// --- Phase 7.2: PIN setup / unlock --------------------------------------
+//
+// Both veneers take a transient NS-supplied PIN buffer (4-16 bytes) and
+// validate the range with cmse_check_address_range before deref. Phase
+// 7.2a routes the PIN via NS (REPL command); 7.2b replaces the entry
+// point with Secure-side button UI that never lets NS touch the PIN.
+//
+// Status codes mirror m9_seed_flash.h's M9_PIN_* constants.
+
+// First-boot provisioning: caller must have wiped (or never written)
+// SEED_FLASH. Generates a random 64-byte placeholder, seals it with the
+// PIN-derived KEK, programs the SEED sector. Phase 7.3 replaces the
+// placeholder with a BIP-39 master seed; until then the unlock flow
+// just exercises the AEAD path -- TEST_SEED in keystore.c continues to
+// supply signing key material.
+int s_pin_setup(const uint8_t *pin, size_t pin_len);
+
+// Verify PIN by unsealing the on-flash blob. Increments the attempt
+// counter before unseal so a power-cycle can't reset it; resets the
+// counter on success. Returns M9_PIN_OK / M9_PIN_ERR_BAD_PIN /
+// M9_PIN_ERR_WIPED (counter reached M9_PIN_MAX_ATTEMPTS, factory-wiped).
+int s_pin_unlock(const uint8_t *pin, size_t pin_len);
+
+// Diagnostic: true iff SEED_FLASH currently holds a valid sealed blob.
+bool s_pin_is_initialized(void);
+
+// Diagnostic: current count of failed-unlock attempts (0..M9_PIN_MAX_ATTEMPTS).
+uint8_t s_pin_attempts(void);
+
 // --- Phase 7.1 self-test ------------------------------------------------
 //
 // Round-trip the seal/unseal primitives entirely in Secure RAM. NS

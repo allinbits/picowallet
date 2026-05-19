@@ -21,6 +21,7 @@
 
 #if PICOWALLET_TRUSTZONE
 #include "os/secure_api.h"
+#include "os/storage/seed_flash.h"   // M9_PIN_* status codes + constants
 #endif
 
 #define LED_PIN PICO_DEFAULT_LED_PIN
@@ -488,6 +489,41 @@ static int dispatch_os(const char *cmd, const char *args,
     }
 #endif  // !PICOWALLET_TRUSTZONE
 #if PICOWALLET_TRUSTZONE
+    if (strcmp(cmd, "pin_status") == 0) {
+        snprintf(reply, reply_size, "initialized=%d attempts=%u/%u",
+                 (int)s_pin_is_initialized(),
+                 (unsigned)s_pin_attempts(),
+                 (unsigned)M9_PIN_MAX_ATTEMPTS);
+        return 0;
+    }
+    if (strcmp(cmd, "pin_setup") == 0) {
+        size_t n = strlen(args);
+        if (n < M9_PIN_MIN_LEN || n > M9_PIN_MAX_LEN) {
+            snprintf(reply, reply_size,
+                     "usage: os.pin_setup <pin %u-%u chars>",
+                     (unsigned)M9_PIN_MIN_LEN, (unsigned)M9_PIN_MAX_LEN);
+            return -1;
+        }
+        int rc = s_pin_setup((const uint8_t *)args, n);
+        if (rc == M9_PIN_OK)                  snprintf(reply, reply_size, "ok: PIN sealed");
+        else if (rc == M9_PIN_ERR_ALREADY_SET) snprintf(reply, reply_size, "already_set");
+        else                                   snprintf(reply, reply_size, "FAIL rc=%d", rc);
+        return rc == M9_PIN_OK ? 0 : -1;
+    }
+    if (strcmp(cmd, "pin_unlock") == 0) {
+        size_t n = strlen(args);
+        if (n < M9_PIN_MIN_LEN || n > M9_PIN_MAX_LEN) {
+            snprintf(reply, reply_size, "usage: os.pin_unlock <pin>");
+            return -1;
+        }
+        int rc = s_pin_unlock((const uint8_t *)args, n);
+        if (rc == M9_PIN_OK)              snprintf(reply, reply_size, "ok: unlocked");
+        else if (rc == M9_PIN_ERR_BAD_PIN) snprintf(reply, reply_size, "bad_pin attempts=%u",
+                                                    (unsigned)s_pin_attempts());
+        else if (rc == M9_PIN_ERR_WIPED)   snprintf(reply, reply_size, "WIPED (attempt limit)");
+        else                               snprintf(reply, reply_size, "FAIL rc=%d", rc);
+        return rc == M9_PIN_OK ? 0 : -1;
+    }
     if (strcmp(cmd, "seal_selftest") == 0) {
         // Phase 7.1 smoke test. Operator types a PIN (4-16 chars) and
         // the Secure side round-trips a random 64-byte payload through

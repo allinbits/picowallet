@@ -391,6 +391,93 @@ int s_hkdf_extract(const s_hkdf_extract_args_t *args) {
     return 0;
 }
 
+// --- Phase 7.2: PIN setup / unlock veneers ------------------------------
+
+#define M9_PIN_BUF_MAX 16u
+
+static int copy_pin_arg(const uint8_t *pin, size_t pin_len, uint8_t out[M9_PIN_BUF_MAX]) {
+    if (!pin) return M9_NEG_PTR;
+    if (pin_len < M9_PIN_MIN_LEN || pin_len > M9_PIN_MAX_LEN) return -102;
+    const void *chk = cmse_check_address_range(
+        (void *)pin, pin_len, CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!chk) return M9_NEG_PTR;
+    memcpy(out, chk, pin_len);
+    return 0;
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_pin_setup(const uint8_t *pin, size_t pin_len) {
+    uint8_t pin_buf[M9_PIN_BUF_MAX];
+    int rc = copy_pin_arg(pin, pin_len, pin_buf);
+    if (rc != 0) return rc;
+    if (m9_seed_flash_is_initialized()) {
+        crypto_wipe(pin_buf, sizeof(pin_buf));
+        return M9_PIN_ERR_ALREADY_SET;
+    }
+
+    uint8_t placeholder[M9_SEALED_SEED_LEN];
+    m9_trng_fill(placeholder, sizeof(placeholder));
+
+    m9_sealed_seed_t blob;
+    int seal_rc = m9_seal_seed(pin_buf, pin_len, placeholder, &blob);
+    crypto_wipe(pin_buf, sizeof(pin_buf));
+    crypto_wipe(placeholder, sizeof(placeholder));
+    if (seal_rc != 0) return M9_PIN_ERR_INTERNAL;
+
+    int store_rc = m9_seed_flash_store(&blob);
+    crypto_wipe(&blob, sizeof(blob));
+    return store_rc == 0 ? M9_PIN_OK : M9_PIN_ERR_INTERNAL;
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_pin_unlock(const uint8_t *pin, size_t pin_len) {
+    uint8_t pin_buf[M9_PIN_BUF_MAX];
+    int rc = copy_pin_arg(pin, pin_len, pin_buf);
+    if (rc != 0) return rc;
+    if (!m9_seed_flash_is_initialized()) {
+        crypto_wipe(pin_buf, sizeof(pin_buf));
+        return M9_PIN_ERR_BAD_PIN;          // no PIN configured -> treat as bad
+    }
+
+    if (m9_pin_attempts() >= M9_PIN_MAX_ATTEMPTS) {
+        m9_factory_wipe_all();
+        crypto_wipe(pin_buf, sizeof(pin_buf));
+        return M9_PIN_ERR_WIPED;
+    }
+
+    // Increment counter BEFORE attempting unseal so a power-cycle
+    // mid-Argon2id doesn't let the attacker retry for free.
+    m9_pin_attempt_record_failure();
+
+    uint8_t plaintext[M9_SEALED_SEED_LEN];
+    const m9_sealed_seed_t *blob = m9_seed_flash_load();
+    int unseal_rc = m9_unseal_seed(pin_buf, pin_len, blob, plaintext);
+    crypto_wipe(pin_buf, sizeof(pin_buf));
+    crypto_wipe(plaintext, sizeof(plaintext));
+
+    if (unseal_rc != 0) {
+        if (m9_pin_attempts() >= M9_PIN_MAX_ATTEMPTS) {
+            m9_factory_wipe_all();
+            return M9_PIN_ERR_WIPED;
+        }
+        return M9_PIN_ERR_BAD_PIN;
+    }
+
+    m9_pin_attempt_reset();
+    return M9_PIN_OK;
+}
+
+__attribute__((cmse_nonsecure_entry))
+bool s_pin_is_initialized(void) {
+    return m9_seed_flash_is_initialized();
+}
+
+__attribute__((cmse_nonsecure_entry))
+uint8_t s_pin_attempts(void) {
+    int n = m9_pin_attempts();
+    return (uint8_t)(n > 255 ? 255 : n);
+}
+
 // --- Phase 7.1: seal/unseal self-test veneer ----------------------------
 //
 // Bounded NS-visible smoke test for m9_seal_seed / m9_unseal_seed.

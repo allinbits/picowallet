@@ -65,14 +65,17 @@ void factory_reset_check_trigger(void) {
 #include "os/ui/console.h"
 #include "os/storage/chains.h"
 #include "os/storage/hwm_flash.h"
+#if PICOWALLET_TRUSTZONE
+#include "os/storage/seed_flash.h"   // m9_factory_wipe_all (Phase 7.2)
+#endif
 
 static const char CONFIRM_SCREEN[] =
     "FACTORY RESET\n\n"
     "This erases ALL chain "
-    "config slots and HWM "
-    "state.\n\n"
-    "The validator key is NOT "
-    "affected.\n\n"
+    "config, HWM, and the "
+    "stored seed + PIN.\n\n"
+    "Restore from your "
+    "mnemonic to recover.\n\n"
     "LEFT to cancel, "
     "RIGHT to confirm.";
 
@@ -83,9 +86,15 @@ bool factory_reset_confirm(void) {
         os_console_log("factory reset: cancelled");
         return false;
     }
+#if PICOWALLET_TRUSTZONE
+    // Single helper wipes SEED + CHAINS + HWM (and the PIN attempt
+    // counter, which lives in the SEED sector).
+    m9_factory_wipe_all();
+#else
     chains_wipe();
     hwm_flash_wipe();
-    os_console_log("factory reset: chains + HWM wiped");
+#endif
+    os_console_log("factory reset: SEED + chains + HWM wiped");
     return true;
 }
 
