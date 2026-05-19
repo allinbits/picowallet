@@ -179,16 +179,16 @@ if(PICOWALLET_TRUSTZONE)
         PICO_RUNTIME_SKIP_INIT_POST_CLOCK_RESETS=1
         PICO_RUNTIME_SKIP_INIT_SPIN_LOCKS_RESET=1
         PICO_RUNTIME_SKIP_INIT_BOOT_LOCKS_RESET=1
-        # CLOCKS deliberately NOT skipped here. We do call clocks_init
-        # from the Secure stub (to bring the PLLs up before NS exists),
-        # but pico-sdk's clock_get_hz reads from a software cache
-        # (configured_freq[]) and each image -- S and NS -- has its own
-        # copy in its own RAM. If NS never runs clocks_init, its cache
-        # is zero and spi_set_baudrate/uart_init compute nonsense baud
-        # rates (SPI ended up at ~75 MHz vs the 4 MHz the e-paper code
-        # asks for). Having NS re-run clocks_init repopulates its cache;
-        # the hardware writes are idempotent because the PLLs are
-        # already at their target values.
+        # CLOCKS / XOSC / PLLs: skipped now that Phase 4 locks these
+        # peripherals Secure-only. The Secure stub still runs clocks_init
+        # in Secure state (PLLs come up before NS exists). NS's own
+        # clock_get_hz cache stays zero -- the only NS caller of it was
+        # bench.c and that now uses s_clock_get_hz() instead. SPI moved
+        # to Secure in Phase 2d so spi_set_baudrate is no longer called
+        # from NS; pico_rand is bypassed via the LWIP_RAND override in
+        # lwipopts.h so its ROSC-running check (which reads CLOCKS) never
+        # fires from NS either.
+        PICO_RUNTIME_SKIP_INIT_CLOCKS=1
         # Coprocessors: NSACR resets with NS access to all coprocessors
         # disabled. NS-side per_core_enable_coprocessors writes CPACR and
         # then executes a coprocessor instruction (vmrs / vlstm pattern)

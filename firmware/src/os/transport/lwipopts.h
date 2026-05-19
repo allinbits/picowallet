@@ -81,4 +81,14 @@
 #define LWIP_IPV6_MLD                   0
 #define LWIP_IPV6_SEND_ROUTER_SOLICIT   0
 
+#if PICOWALLET_TRUSTZONE
+// Route LWIP_RAND() through the Secure TRNG veneer instead of
+// pico_rand's get_rand_32(). Phase 4 locks the CLOCKS / ROSC
+// peripherals Secure-only and pico_rand's ROSC sampler would fault.
+// The picowallet_lwip_rand wrapper lives in firmware/src/os/transport/eth.c.
+#include <stdint.h>
+uint32_t picowallet_lwip_rand(void);
+#define LWIP_RAND() picowallet_lwip_rand()
+#endif
+
 #endif /* __LWIPOPTS_H__ */

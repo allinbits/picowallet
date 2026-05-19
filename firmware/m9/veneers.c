@@ -40,6 +40,8 @@
 #include "os/ui/mode_select.h"
 #include "os/ui/factory_reset.h"
 
+#include "hardware/clocks.h"
+
 // Phase 2c: signing veneers reach into Secure-side keystore.c which has
 // the seed + SLIP-10 + Ed25519 + SHA-512 (all compiled only into the
 // Secure target via PICOWALLET_SECURE_BUILD).
@@ -395,6 +397,18 @@ uint8_t s_mode_select_prompt(void) {
 __attribute__((cmse_nonsecure_entry))
 bool s_factory_reset_with_consent(void) {
     return factory_reset_confirm();
+}
+
+// Read the Secure-side software cache of the clock frequencies. After
+// Phase 4 NS skips runtime_init_clocks (CLOCKS/XOSC/PLLs are locked
+// Secure-only) so its own clock_get_hz returns 0; this veneer is the
+// canonical query path. Caller passes a pico-sdk clock_handle_t (which
+// is the small clk_* enum); we pin to uint8_t for the cmse register-arg
+// limit and bounds-check before forwarding.
+__attribute__((cmse_nonsecure_entry))
+uint32_t s_clock_get_hz(uint8_t clock_idx) {
+    if (clock_idx >= CLK_COUNT) return 0;
+    return clock_get_hz((clock_handle_t)clock_idx);
 }
 
 __attribute__((cmse_nonsecure_entry))

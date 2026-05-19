@@ -173,4 +173,11 @@ bool s_input_pressed(uint8_t btn);
 // TRNG entropy. NS uses this for SC ephemerals.
 int s_random(uint8_t *out, size_t n);
 
+// Read a clock frequency from the Secure-side software cache. After
+// Phase 4 NS no longer runs runtime_init_clocks (CLOCKS / XOSC / PLLs
+// are locked Secure-only), so its own pico-sdk clock_get_hz cache is
+// zero. Argument is a pico-sdk clock_handle_t value (clk_sys etc.)
+// truncated to uint8_t.
+uint32_t s_clock_get_hz(uint8_t clock_idx);
+
 const char *s_status_str(int status);

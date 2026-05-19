@@ -243,6 +243,20 @@ static void m9_accessctrl_open_for_ns(void) {
     // TICKS peripheral, so watchdog_hw->tick is no longer in the
     // runtime-init hot path -- safe to lock independently.)
     r[0xD8 / 4u] = PW | 0xFCu;   // ACCESSCTRL_WATCHDOG
+
+    // Clock-tree peripherals. The Secure stub runs clocks_init in
+    // Secure state to bring the PLLs / XOSC up before BXNS; NS skips
+    // its runtime_init_clocks (PICO_RUNTIME_SKIP_INIT_CLOCKS) and reads
+    // frequencies through the s_clock_get_hz veneer when it needs them.
+    // ROSC is also locked because pico_rand's ROSC sampler would
+    // otherwise read clocks_hw to verify the CPU isn't on ROSC; NS
+    // routes randomness through LWIP_RAND -> s_random instead so
+    // pico_rand is never called.
+    r[0xC0 / 4u] = PW | 0xFCu;   // ACCESSCTRL_CLOCKS
+    r[0xC4 / 4u] = PW | 0xFCu;   // ACCESSCTRL_XOSC
+    r[0xC8 / 4u] = PW | 0xFCu;   // ACCESSCTRL_ROSC
+    r[0xCC / 4u] = PW | 0xFCu;   // ACCESSCTRL_PLL_SYS
+    r[0xD0 / 4u] = PW | 0xFCu;   // ACCESSCTRL_PLL_USB
     __asm__ volatile("dsb");
 }
 

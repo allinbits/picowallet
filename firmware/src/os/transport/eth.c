@@ -23,6 +23,23 @@
 
 #include "os/transport/eth.h"
 
+#if PICOWALLET_TRUSTZONE
+#include "os/secure_api.h"
+
+// LWIP_RAND override target. lwipopts.h forwards LWIP_RAND() here so
+// lwIP's UDP source-port salt + TCP ISN come from the Secure TRNG
+// rather than pico_rand's ROSC sampler -- Phase 4 locks the CLOCKS /
+// ROSC peripherals to Secure-only and pico_rand's get_rand_*() would
+// fault on its ROSC-running check. Boundary crossings here are rare
+// (initial socket setup + retransmission jitter) so the SG round-trip
+// cost is irrelevant.
+uint32_t picowallet_lwip_rand(void) {
+    uint32_t r = 0;
+    s_random((uint8_t *)&r, sizeof(r));
+    return r;
+}
+#endif
+
 #define DEVICE_IP_STR     "192.168.7.1"
 #define NETMASK_STR       "255.255.255.0"
 #define GATEWAY_STR       "0.0.0.0"

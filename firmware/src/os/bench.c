@@ -12,6 +12,10 @@
 #include "os/crypto/monocypher.h"
 #include "os/crypto/monocypher-ed25519.h"
 
+#if PICOWALLET_TRUSTZONE
+#include "os/secure_api.h"
+#endif
+
 static void emit(const char *line) {
     usb_cdc_printf("%s\r\n", line);
     os_console_log(line);
@@ -33,7 +37,11 @@ int bench_ed25519(char *reply, size_t reply_size) {
     const int PROGRESS = 1000;
     char buf[80];
 
+#if PICOWALLET_TRUSTZONE
+    uint32_t cpu_hz = s_clock_get_hz((uint8_t)clk_sys);
+#else
     uint32_t cpu_hz = clock_get_hz(clk_sys);
+#endif
     snprintf(buf, sizeof(buf), "clk_sys = %u MHz", (unsigned)(cpu_hz / 1000000u));
     emit(buf);
     usb_cdc_printf("running %d sign + %d verify iters (may take ~2 min)...\r\n", N, N);
