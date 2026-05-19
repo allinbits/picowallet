@@ -14,7 +14,16 @@
 #define EPH_SIZE_PFX   34u   // uvarint < 128 ⇒ single byte
 #define AUTH_SIZE_PFX  100u  // uvarint < 128 ⇒ single byte
 
+#if PICOWALLET_TRUSTZONE
+#include "os/secure_api.h"
+#endif
+
 static void fill_random(uint8_t *out, size_t n) {
+#if PICOWALLET_TRUSTZONE
+    // Phase 2e: route through the Secure TRNG veneer so Phase 4 can lock
+    // ACCESSCTRL_TRNG back to Secure-only without breaking the SC ephemeral.
+    s_random(out, n);
+#else
     // get_rand_64 is hardware-TRNG backed on RP2350.
     size_t i = 0;
     while (i + 8 <= n) {
@@ -26,6 +35,7 @@ static void fill_random(uint8_t *out, size_t n) {
         uint64_t r = get_rand_64();
         for (size_t j = 0; j < n - i; j++) out[i + j] = (uint8_t)(r >> (8 * j));
     }
+#endif
 }
 
 void gno_sc_start(gno_sc_t *sc,

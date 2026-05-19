@@ -32,7 +32,14 @@
 #define LBL_DH_SECRET    "DH_SECRET"
 #define LBL_MAC          "SECRET_CONNECTION_MAC"
 
+#if PICOWALLET_TRUSTZONE
+#include "os/secure_api.h"
+#endif
+
 static void fill_random(uint8_t *out, size_t n) {
+#if PICOWALLET_TRUSTZONE
+    s_random(out, n);
+#else
     size_t i = 0;
     while (i + 8 <= n) {
         uint64_t r = get_rand_64();
@@ -43,6 +50,7 @@ static void fill_random(uint8_t *out, size_t n) {
         uint64_t r = get_rand_64();
         for (size_t j = 0; j < n - i; j++) out[i + j] = (uint8_t)(r >> (8 * j));
     }
+#endif
 }
 
 void cosmos_sc_start(cosmos_sc_t *sc,
