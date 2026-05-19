@@ -35,12 +35,12 @@ typedef enum {
 } pin_btn_evt_t;
 
 static pin_btn_evt_t wait_button(void) {
-    // Wait for any leftover presses to release.
-    while (input_pressed(INPUT_BTN_LEFT) || input_pressed(INPUT_BTN_RIGHT)) {
-        sleep_ms(PIN_BTN_POLL_MS);
-    }
-    sleep_ms(PIN_BTN_POLL_MS * 4);   // settle after release
-    // Wait for the next fresh press.
+    // No leading drain: e-paper refreshes take 300ms-1s and the
+    // operator typically presses during the refresh; the drain would
+    // make those presses count as "leftover" and discard them. Instead
+    // emit on the first observed press (already pressed = OK) and
+    // wait for release at the end so the next call starts with all
+    // buttons up regardless of how this one returns.
     while (1) {
         bool L = input_pressed(INPUT_BTN_LEFT);
         bool R = input_pressed(INPUT_BTN_RIGHT);
@@ -48,13 +48,27 @@ static pin_btn_evt_t wait_button(void) {
             sleep_ms(PIN_BTN_DEBOUNCE_MS);    // window for both-down
             L = input_pressed(INPUT_BTN_LEFT);
             R = input_pressed(INPUT_BTN_RIGHT);
-            if (L && R) return PIN_BTN_BOTH;
-            if (L)      return PIN_BTN_LEFT;
-            if (R)      return PIN_BTN_RIGHT;
+            pin_btn_evt_t evt = (L && R) ? PIN_BTN_BOTH
+                              : L         ? PIN_BTN_LEFT
+                                          : PIN_BTN_RIGHT;
+            // Wait for release before returning so the next call sees
+            // a fresh button state.
+            while (input_pressed(INPUT_BTN_LEFT) || input_pressed(INPUT_BTN_RIGHT)) {
+                sleep_ms(PIN_BTN_POLL_MS);
+            }
+            return evt;
         }
         sleep_ms(PIN_BTN_POLL_MS);
     }
 }
+
+// Re-baseline the panel every PIN_UI_FULL_REFRESH_EVERY render calls,
+// otherwise use the fast partial-LUT path. Each PIN unlock takes ~12
+// renders (4 digits * scroll-then-commit + DONE); doing a full at the
+// start of the flow and one every 16 partials keeps ghosting in check
+// without making the UX feel slow.
+#define PIN_UI_FULL_REFRESH_EVERY 16
+static int s_renders_since_full;
 
 static void render_entry(const char *header, int n_entered, int cur_sel) {
     display_clear();
@@ -93,7 +107,13 @@ static void render_entry(const char *header, int n_entered, int cur_sel) {
     Paint_DrawString_EN(8, 246, "< LEFT  RIGHT >    BOTH = commit",
                         &Font16, WHITE, BLACK);
 
-    display_render_full();
+    if (s_renders_since_full >= PIN_UI_FULL_REFRESH_EVERY) {
+        display_render_full();
+        s_renders_since_full = 0;
+    } else {
+        display_render_fast();
+        s_renders_since_full++;
+    }
 }
 
 void pin_ui_show_busy(const char *msg) {
@@ -122,6 +142,10 @@ int pin_ui_collect(const char *header, char *out_pin, size_t out_size) {
     memset(pin, 0, sizeof(pin));
     int n = 0;
     int sel = 0;
+    // First render of each entry session uses the full LUT to re-baseline
+    // the panel after whatever the previous flow (splash, mode_select)
+    // left on screen.
+    s_renders_since_full = PIN_UI_FULL_REFRESH_EVERY;
 
     while (1) {
         render_entry(header, n, sel);

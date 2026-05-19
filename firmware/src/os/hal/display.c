@@ -11,6 +11,7 @@
 void display_init(void)         { s_display_init(); }
 void display_clear(void)        { /* unused on NS under TZ -- canned screens only */ }
 void display_render_full(void)  { /* unused on NS under TZ */ }
+void display_render_fast(void)  { /* unused on NS under TZ */ }
 void display_render_clean(void) { /* unused on NS under TZ */ }
 
 #else
@@ -52,6 +53,17 @@ void display_clear(void) {
 
 void display_render_full(void) {
     EPD_3IN7_1Gray_Display(framebuffer);
+}
+
+void display_render_fast(void) {
+    // Drive the whole panel through the partial-update LUT. Same
+    // framebuffer coverage as display_render_full but ~3x faster (the
+    // partial LUT skips the deep-clear waveform), at the cost of some
+    // ghosting after several cycles. Callers should periodically fall
+    // back to display_render_full (or _clean) to refresh the baseline.
+    EPD_3IN7_1Gray_Display_Part(framebuffer,
+                                0, 0,
+                                EPD_3IN7_WIDTH, EPD_3IN7_HEIGHT);
 }
 
 void display_render_clean(void) {
