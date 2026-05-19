@@ -16,6 +16,8 @@ add_executable(picowallet_secure
     trng.c
     # Phase 7.1: PIN-sealed master-seed primitives (Argon2id + AEAD).
     ../src/os/storage/seed_flash.c
+    # Phase 7.2b: Secure-side PIN entry UI (button + e-paper).
+    ../src/os/ui/pin_ui.c
     # Phase 2c: keystore + Ed25519/SHA-512 move from NS to Secure. The seed
     # (TEST_SEED today; encrypted-and-PIN-unlocked in M9.5) and the
     # signing routines never appear in NS flash. NS reaches them only via

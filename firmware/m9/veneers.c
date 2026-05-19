@@ -45,6 +45,7 @@
 #include "os/crypto/sha256.h"
 #include "os/crypto/monocypher.h"
 #include "os/storage/seed_flash.h"
+#include "os/ui/pin_ui.h"
 
 // Phase 2c: signing veneers reach into Secure-side keystore.c which has
 // the seed + SLIP-10 + Ed25519 + SHA-512 (all compiled only into the
@@ -391,78 +392,86 @@ int s_hkdf_extract(const s_hkdf_extract_args_t *args) {
     return 0;
 }
 
-// --- Phase 7.2: PIN setup / unlock veneers ------------------------------
+// --- Phase 7.2b: PIN setup / unlock veneers (Secure-driven UI) ----------
+//
+// Both veneers take NO PIN argument. The PIN is collected on the
+// Secure side via pin_ui_collect (button input + e-paper render), so
+// NS never sees it. The veneers run the full state machine (mismatch
+// retries, counter increment, wipe-on-N-failures) before returning a
+// single status code.
 
-#define M9_PIN_BUF_MAX 16u
+static int do_pin_setup_internal(void) {
+    if (m9_seed_flash_is_initialized()) return M9_PIN_ERR_ALREADY_SET;
 
-static int copy_pin_arg(const uint8_t *pin, size_t pin_len, uint8_t out[M9_PIN_BUF_MAX]) {
-    if (!pin) return M9_NEG_PTR;
-    if (pin_len < M9_PIN_MIN_LEN || pin_len > M9_PIN_MAX_LEN) return -102;
-    const void *chk = cmse_check_address_range(
-        (void *)pin, pin_len, CMSE_NONSECURE | CMSE_MPU_READ);
-    if (!chk) return M9_NEG_PTR;
-    memcpy(out, chk, pin_len);
-    return 0;
-}
-
-__attribute__((cmse_nonsecure_entry))
-int s_pin_setup(const uint8_t *pin, size_t pin_len) {
-    uint8_t pin_buf[M9_PIN_BUF_MAX];
-    int rc = copy_pin_arg(pin, pin_len, pin_buf);
-    if (rc != 0) return rc;
-    if (m9_seed_flash_is_initialized()) {
-        crypto_wipe(pin_buf, sizeof(pin_buf));
-        return M9_PIN_ERR_ALREADY_SET;
+    // Loop until the operator enters matching PINs twice. Internal
+    // mismatch retry keeps the boot flow contained to a single veneer
+    // call.
+    char pin1[PIN_UI_MAX_DIGITS + 1];
+    char pin2[PIN_UI_MAX_DIGITS + 1];
+    int  n1, n2;
+    while (1) {
+        n1 = pin_ui_collect("Set PIN",     pin1, sizeof(pin1));
+        n2 = pin_ui_collect("Confirm PIN", pin2, sizeof(pin2));
+        if (n1 == n2 && memcmp(pin1, pin2, (size_t)n1) == 0) break;
+        crypto_wipe(pin1, sizeof(pin1));
+        crypto_wipe(pin2, sizeof(pin2));
+        pin_ui_show_status("Mismatch - retry");
     }
 
+    pin_ui_show_busy("Sealing...");
     uint8_t placeholder[M9_SEALED_SEED_LEN];
     m9_trng_fill(placeholder, sizeof(placeholder));
 
     m9_sealed_seed_t blob;
-    int seal_rc = m9_seal_seed(pin_buf, pin_len, placeholder, &blob);
-    crypto_wipe(pin_buf, sizeof(pin_buf));
+    int seal_rc = m9_seal_seed((const uint8_t *)pin1, (size_t)n1, placeholder, &blob);
+    crypto_wipe(pin1, sizeof(pin1));
+    crypto_wipe(pin2, sizeof(pin2));
     crypto_wipe(placeholder, sizeof(placeholder));
-    if (seal_rc != 0) return M9_PIN_ERR_INTERNAL;
-
-    int store_rc = m9_seed_flash_store(&blob);
+    if (seal_rc != 0) {
+        crypto_wipe(&blob, sizeof(blob));
+        return M9_PIN_ERR_INTERNAL;
+    }
+    int rc = m9_seed_flash_store(&blob);
     crypto_wipe(&blob, sizeof(blob));
-    return store_rc == 0 ? M9_PIN_OK : M9_PIN_ERR_INTERNAL;
+    if (rc != 0) return M9_PIN_ERR_INTERNAL;
+    pin_ui_show_status("PIN set");
+    return M9_PIN_OK;
 }
 
 __attribute__((cmse_nonsecure_entry))
-int s_pin_unlock(const uint8_t *pin, size_t pin_len) {
-    uint8_t pin_buf[M9_PIN_BUF_MAX];
-    int rc = copy_pin_arg(pin, pin_len, pin_buf);
-    if (rc != 0) return rc;
-    if (!m9_seed_flash_is_initialized()) {
-        crypto_wipe(pin_buf, sizeof(pin_buf));
-        return M9_PIN_ERR_BAD_PIN;          // no PIN configured -> treat as bad
-    }
+int s_pin_setup(void) {
+    return do_pin_setup_internal();
+}
 
+__attribute__((cmse_nonsecure_entry))
+int s_pin_unlock(void) {
+    if (!m9_seed_flash_is_initialized()) return M9_PIN_ERR_BAD_PIN;
     if (m9_pin_attempts() >= M9_PIN_MAX_ATTEMPTS) {
         m9_factory_wipe_all();
-        crypto_wipe(pin_buf, sizeof(pin_buf));
         return M9_PIN_ERR_WIPED;
     }
 
-    // Increment counter BEFORE attempting unseal so a power-cycle
-    // mid-Argon2id doesn't let the attacker retry for free.
-    m9_pin_attempt_record_failure();
+    char pin[PIN_UI_MAX_DIGITS + 1];
+    int n = pin_ui_collect("Enter PIN", pin, sizeof(pin));
+
+    pin_ui_show_busy("Verifying...");
+    m9_pin_attempt_record_failure();   // pessimistic: bump before unseal
 
     uint8_t plaintext[M9_SEALED_SEED_LEN];
     const m9_sealed_seed_t *blob = m9_seed_flash_load();
-    int unseal_rc = m9_unseal_seed(pin_buf, pin_len, blob, plaintext);
-    crypto_wipe(pin_buf, sizeof(pin_buf));
+    int unseal_rc = m9_unseal_seed((const uint8_t *)pin, (size_t)n, blob, plaintext);
+    crypto_wipe(pin, sizeof(pin));
     crypto_wipe(plaintext, sizeof(plaintext));
 
     if (unseal_rc != 0) {
         if (m9_pin_attempts() >= M9_PIN_MAX_ATTEMPTS) {
             m9_factory_wipe_all();
+            pin_ui_show_status("WIPED");
             return M9_PIN_ERR_WIPED;
         }
+        pin_ui_show_status("Bad PIN");
         return M9_PIN_ERR_BAD_PIN;
     }
-
     m9_pin_attempt_reset();
     return M9_PIN_OK;
 }

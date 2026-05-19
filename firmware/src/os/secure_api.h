@@ -201,26 +201,24 @@ uint32_t s_clock_get_hz(uint8_t clock_idx);
 
 // --- Phase 7.2: PIN setup / unlock --------------------------------------
 //
-// Both veneers take a transient NS-supplied PIN buffer (4-16 bytes) and
-// validate the range with cmse_check_address_range before deref. Phase
-// 7.2a routes the PIN via NS (REPL command); 7.2b replaces the entry
-// point with Secure-side button UI that never lets NS touch the PIN.
-//
-// Status codes mirror m9_seed_flash.h's M9_PIN_* constants.
+// PIN is collected on the Secure side via pin_ui (button input + e-paper
+// render). NS never touches the PIN. Both veneers take no arguments and
+// drive the full flow internally; return values map to seed_flash.h's
+// M9_PIN_* constants.
 
-// First-boot provisioning: caller must have wiped (or never written)
-// SEED_FLASH. Generates a random 64-byte placeholder, seals it with the
-// PIN-derived KEK, programs the SEED sector. Phase 7.3 replaces the
-// placeholder with a BIP-39 master seed; until then the unlock flow
-// just exercises the AEAD path -- TEST_SEED in keystore.c continues to
-// supply signing key material.
-int s_pin_setup(const uint8_t *pin, size_t pin_len);
+// First-boot provisioning. Prompts the operator to set a 4-8 digit PIN
+// (twice for confirmation), generates a random 64-byte placeholder,
+// seals it with the PIN-derived KEK, programs the SEED sector. Phase
+// 7.3 replaces the placeholder with a BIP-39 master seed; until then
+// the unlock flow just exercises the AEAD path -- TEST_SEED in
+// keystore.c continues to supply signing key material.
+int s_pin_setup(void);
 
-// Verify PIN by unsealing the on-flash blob. Increments the attempt
-// counter before unseal so a power-cycle can't reset it; resets the
-// counter on success. Returns M9_PIN_OK / M9_PIN_ERR_BAD_PIN /
-// M9_PIN_ERR_WIPED (counter reached M9_PIN_MAX_ATTEMPTS, factory-wiped).
-int s_pin_unlock(const uint8_t *pin, size_t pin_len);
+// Unlock prompt. Renders "Enter PIN", increments the attempt counter
+// before unsealing, resets it on success. Returns M9_PIN_OK on
+// correct PIN, M9_PIN_ERR_BAD_PIN otherwise, M9_PIN_ERR_WIPED if the
+// attempt counter just hit M9_PIN_MAX_ATTEMPTS (device factory-wiped).
+int s_pin_unlock(void);
 
 // Diagnostic: true iff SEED_FLASH currently holds a valid sealed blob.
 bool s_pin_is_initialized(void);

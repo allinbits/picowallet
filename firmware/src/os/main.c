@@ -7,6 +7,7 @@
 
 #if PICOWALLET_TRUSTZONE
 #include "hardware/dma.h"
+#include "os/storage/seed_flash.h"   // M9_PIN_OK / M9_PIN_ERR_WIPED
 #endif
 
 #include "os/hal/display.h"
@@ -96,9 +97,30 @@ int main(void) {
     usb_console_init();
     console_init();
 
-    // Boot sequence: splash -> hold -> mode-selection prompt -> main screen.
+    // Boot sequence: splash -> PIN setup-or-unlock -> mode-selection
+    //                -> main screen.
     splash_render();          // clears + multi-pass refresh, ~9 s
-    sleep_ms(4500);           // hold splash on screen
+    sleep_ms(2000);           // hold splash on screen briefly
+
+#if PICOWALLET_TRUSTZONE
+    // M9.5 Phase 7.2b: enforce a PIN gate before signing material can
+    // be reached. On first boot s_pin_setup runs the set+confirm flow;
+    // subsequent boots loop on s_pin_unlock until the operator enters
+    // the correct PIN (or hits M9_PIN_MAX_ATTEMPTS -> auto-wipe ->
+    // back to setup on the same boot).
+    while (1) {
+        if (!s_pin_is_initialized()) {
+            int rc = s_pin_setup();
+            if (rc == M9_PIN_OK) break;
+            // Setup failure (extremely rare -- internal error) -- retry.
+            continue;
+        }
+        int rc = s_pin_unlock();
+        if (rc == M9_PIN_OK)        break;
+        if (rc == M9_PIN_ERR_WIPED) continue;   // wiped -> setup path next iter
+        // M9_PIN_ERR_BAD_PIN -> re-prompt the operator.
+    }
+#endif
 
     os_current_mode = mode_select_prompt();
 
