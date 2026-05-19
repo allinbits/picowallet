@@ -11,6 +11,16 @@ option(PICOWALLET_TRUSTZONE
        "Build with the M9 TrustZone-M split (Phase 1+, requires hardware to validate)"
        OFF)
 
+# Phase 6 negative test. When ON, NS main() reads a Secure-attributed
+# address early in boot. Correct behavior: SecureFault.AUVIOL, then
+# the Secure HardFault handler loops -- openocd inspection of SFSR
+# (0xE000EDE4) confirms the AUVIOL bit. If NS instead returns from
+# the load and the LED comes on solid, the boundary is broken.
+# Default OFF; flip ON to run the test, then back OFF for normal use.
+option(PICOWALLET_M9_NEGATIVE_TEST
+       "Run the NS-deref-Secure-VA boundary check at NS boot"
+       OFF)
+
 # Dependencies are git submodules under third_party/. Run:
 #   git submodule update --init --recursive
 # from the repo root after cloning.
@@ -231,6 +241,10 @@ if(PICOWALLET_TRUSTZONE)
         # fall back to ROSC drift + timer when the TRNG source is off.
         PICO_RAND_ENTROPY_SRC_TRNG=0
     )
+    if(PICOWALLET_M9_NEGATIVE_TEST)
+        target_compile_definitions(picowallet PRIVATE PICOWALLET_M9_NEGATIVE_TEST=1)
+        message(STATUS "M9: negative test ENABLED -- NS will fault at boot if boundary holds")
+    endif()
     add_subdirectory(m9)
     # Phase 2: NS image links against the import library that the Secure
     # link produces (`--cmse-implib --out-implib=...`). Each s_*() symbol

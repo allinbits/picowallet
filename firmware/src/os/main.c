@@ -50,6 +50,30 @@ int main(void) {
     // RAZ/WI on any write to the channel's CTRL_TRIG.
     dma_channel_claim(0);
 
+#if PICOWALLET_M9_NEGATIVE_TEST
+    // Phase 6 boundary check. Read a Secure-attributed address from
+    // NS state. The SAU should redirect this to a SecureFault.AUVIOL
+    // before the load returns; the Secure HardFault handler then
+    // loops the CPU. If execution continues past `leaked`, the
+    // boundary is BROKEN -- hang here with the LED on so the operator
+    // notices, and openocd's SFSR readout confirms the fault path.
+    //
+    // The expected (correct) outcome: NS never returns from the
+    // load; chip halts in the Secure fault handler, SFSR has the
+    // AUVIOL bit set (0x00000008). Verify with:
+    //   echo "halt; mdw 0xE000EDE4 1" | nc localhost 4444
+    //
+    // Address 0x10000000 is the start of the Secure image (vector
+    // table). Any read from 0x10000000..0x10080000 should fault.
+    {
+        volatile uint32_t *secure_ptr = (volatile uint32_t *)0x10000000u;
+        volatile uint32_t leaked = *secure_ptr;
+        (void)leaked;
+        gpio_put(LED_PIN, 1);
+        for (;;) { /* boundary broken -- LED solid */ }
+    }
+#endif
+
     // Phase 2a smoke-test: cross the NS->S boundary once before doing
     // anything else. If the veneer round-trips correctly, the SG path
     // and the implib link both worked.
