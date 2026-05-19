@@ -9,6 +9,7 @@
 
 #include "pico/time.h"
 
+#include "os/crypto/bip39_wordlist.h"
 #include "os/crypto/monocypher.h"   // crypto_wipe
 #include "os/hal/display.h"
 #include "os/hal/input.h"
@@ -133,6 +134,56 @@ void pin_ui_show_status(const char *msg) {
     Paint_DrawString_EN(8, 100, msg, &Font24, WHITE, BLACK);
     display_render_full();
     sleep_ms(1500);    // hold so operator reads it before the next render
+}
+
+void pin_ui_show_mnemonic(const uint16_t word_indices[24]) {
+    // Layout: 4 pages, 6 words each. RIGHT advances; BOTH on the final
+    // page confirms the operator has written it down. LEFT is ignored
+    // (no "go back"; we don't want the operator skipping forward and
+    // then accidentally backing out without seeing each page).
+    for (int page = 0; page < 4; page++) {
+        display_clear();
+        Paint_DrawString_EN(8, 4, "PicoWallet", &Font20, WHITE, BLACK);
+        Paint_DrawLine(0, 30, DISPLAY_WIDTH - 1, 30, BLACK,
+                       DOT_PIXEL_1X1, LINE_STYLE_SOLID);
+
+        char header[40];
+        snprintf(header, sizeof(header), "Write down (%d/4)", page + 1);
+        Paint_DrawString_EN(8, 36, header, &Font20, WHITE, BLACK);
+
+        for (int i = 0; i < 6; i++) {
+            int idx = page * 6 + i;
+            char line[24];
+            snprintf(line, sizeof(line), "%2d. %s",
+                     idx + 1, bip39_wordlist[word_indices[idx]]);
+            Paint_DrawString_EN(8, 70 + i * 26, line, &Font20, WHITE, BLACK);
+        }
+
+        Paint_DrawLine(0, 230, DISPLAY_WIDTH - 1, 230, BLACK,
+                       DOT_PIXEL_1X1, LINE_STYLE_SOLID);
+        if (page < 3) {
+            Paint_DrawString_EN(8, 246, "RIGHT > next page",
+                                &Font16, WHITE, BLACK);
+        } else {
+            Paint_DrawString_EN(8, 246, "BOTH = confirm written down",
+                                &Font16, WHITE, BLACK);
+        }
+        // Force-full on every page so each one is rendered cleanly --
+        // operator MUST read these accurately, no ghosting.
+        s_renders_since_full = PIN_UI_FULL_REFRESH_EVERY;
+        display_render_full();
+
+        // Wait for the right action: RIGHT to advance pages 0..2, BOTH
+        // to confirm on page 3. Other inputs are ignored.
+        while (1) {
+            pin_btn_evt_t e = wait_button();
+            if (page < 3) {
+                if (e == PIN_BTN_RIGHT) break;
+            } else {
+                if (e == PIN_BTN_BOTH)  break;
+            }
+        }
+    }
 }
 
 int pin_ui_collect(const char *header, char *out_pin, size_t out_size) {

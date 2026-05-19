@@ -65,37 +65,65 @@ void factory_reset_check_trigger(void) {
 #include "os/ui/console.h"
 #include "os/storage/chains.h"
 #include "os/storage/hwm_flash.h"
-#if PICOWALLET_TRUSTZONE
+#if PICOWALLET_SECURE_BUILD
+#include <stdio.h>
+#include "pico/time.h"               // sleep_ms
+#include "hardware/watchdog.h"
+#include "os/hal/input.h"            // INPUT_BTN_LEFT/RIGHT, input_pressed
 #include "os/storage/seed_flash.h"   // m9_factory_wipe_all (Phase 7.2)
+#include "os/ui/pin_ui.h"            // pin_ui_show_status (Secure side)
 #endif
 
-static const char CONFIRM_SCREEN[] =
-    "FACTORY RESET\n\n"
-    "This erases ALL chain "
-    "config, HWM, and the "
-    "stored seed + PIN.\n\n"
-    "Restore from your "
-    "mnemonic to recover.\n\n"
-    "LEFT to cancel, "
-    "RIGHT to confirm.";
-
 bool factory_reset_confirm(void) {
+#if PICOWALLET_SECURE_BUILD
+    // The 5-second both-button hold that summoned us is the consent
+    // gesture (FACTORY_RESET_HOLD_MS in factory_reset.h). Instead of a
+    // second confirm screen -- which has its own button-input UX
+    // hazards on top of an already-deliberate gesture -- show a
+    // 3-second cancel-window countdown. If the operator releases either
+    // button before the count expires, we bail. Otherwise wipe and
+    // reboot.
+    for (int i = 3; i >= 1; i--) {
+        char msg[24];
+        snprintf(msg, sizeof(msg), "WIPE in %d", i);
+        pin_ui_show_busy(msg);
+        // Sample at 50ms over the 1-sec window so a release cancels
+        // promptly.
+        for (int j = 0; j < 20; j++) {
+            if (!input_pressed(INPUT_BTN_LEFT) ||
+                !input_pressed(INPUT_BTN_RIGHT)) {
+                pin_ui_show_status("Cancelled");
+                return false;
+            }
+            sleep_ms(50);
+        }
+    }
+    pin_ui_show_status("Wiping...");
+    m9_factory_wipe_all();
+    pin_ui_show_status("Wiped - rebooting");
+    // After wipe the device has no PIN, no seed, no chains. Reboot so
+    // the boot path lands on the PIN-setup + mnemonic-generate flow.
+    watchdog_reboot(0, 0, 0);
+    while (1) { __asm__ volatile("wfi"); }
+#else
+    // Pre-TZ: keep the confirm-screen flow (still uses os_display_confirm).
+    static const char CONFIRM_SCREEN[] =
+        "FACTORY RESET\n\n"
+        "Erases chain config "
+        "and HWM state.\n\n"
+        "LEFT to cancel, "
+        "RIGHT to confirm.";
     const char *screens[1] = { CONFIRM_SCREEN };
     os_confirm_t r = os_display_confirm(screens, 1);
     if (r != OS_CONFIRM_ACCEPTED) {
         os_console_log("factory reset: cancelled");
         return false;
     }
-#if PICOWALLET_TRUSTZONE
-    // Single helper wipes SEED + CHAINS + HWM (and the PIN attempt
-    // counter, which lives in the SEED sector).
-    m9_factory_wipe_all();
-#else
     chains_wipe();
     hwm_flash_wipe();
-#endif
-    os_console_log("factory reset: SEED + chains + HWM wiped");
+    os_console_log("factory reset: chains + HWM wiped");
     return true;
+#endif
 }
 
 #if !PICOWALLET_TRUSTZONE

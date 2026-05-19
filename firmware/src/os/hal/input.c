@@ -34,19 +34,32 @@ bool input_pressed(int btn) {
 }
 
 int input_wait_press(void) {
-    // Drain any held buttons left over from a previous interaction.
-    while (input_pressed(INPUT_BTN_LEFT) || input_pressed(INPUT_BTN_RIGHT)) {
-        sleep_ms(5);
-    }
-    sleep_ms(20);
-
+    // No leading drain: under M9 the previous flow (factory-reset
+    // trigger, Secure PIN UI, etc.) often leaves a button held when
+    // we enter, and the drain would discard the operator's input.
+    // Wait for any press with a debounce, but if BOTH are seen after
+    // the debounce window, wait for differentiation before deciding
+    // (otherwise a 5-sec both-button trigger can latch onto LEFT and
+    // accidentally DENY the confirm screen the trigger just summoned).
     while (1) {
-        bool left  = input_pressed(INPUT_BTN_LEFT);
-        bool right = input_pressed(INPUT_BTN_RIGHT);
-        if (left || right) {
-            sleep_ms(20); // debounce hold
-            if (left  && input_pressed(INPUT_BTN_LEFT))  return INPUT_BTN_LEFT;
-            if (right && input_pressed(INPUT_BTN_RIGHT)) return INPUT_BTN_RIGHT;
+        bool L = input_pressed(INPUT_BTN_LEFT);
+        bool R = input_pressed(INPUT_BTN_RIGHT);
+        if (L || R) {
+            sleep_ms(40);
+            L = input_pressed(INPUT_BTN_LEFT);
+            R = input_pressed(INPUT_BTN_RIGHT);
+            if (L && R) {
+                // Both still pressed -- spin until one is released, then re-poll.
+                while (input_pressed(INPUT_BTN_LEFT) &&
+                       input_pressed(INPUT_BTN_RIGHT)) {
+                    sleep_ms(5);
+                }
+                continue;
+            }
+            int btn = L ? INPUT_BTN_LEFT : INPUT_BTN_RIGHT;
+            // Wait for release so the next call starts from a clean state.
+            while (input_pressed(btn)) sleep_ms(5);
+            return btn;
         }
         sleep_ms(5);
     }

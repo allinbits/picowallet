@@ -18,6 +18,9 @@ add_executable(picowallet_secure
     ../src/os/storage/seed_flash.c
     # Phase 7.2b: Secure-side PIN entry UI (button + e-paper).
     ../src/os/ui/pin_ui.c
+    # Phase 7.3: BIP-39 mnemonic generate + PBKDF2-HMAC-SHA512 derivation.
+    ../src/os/crypto/bip39.c
+    ../src/os/crypto/bip39_wordlist.c
     # Phase 2c: keystore + Ed25519/SHA-512 move from NS to Secure. The seed
     # (TEST_SEED today; encrypted-and-PIN-unlocked in M9.5) and the
     # signing routines never appear in NS flash. NS reaches them only via
@@ -106,8 +109,9 @@ target_link_libraries(picowallet_secure
     pico_bootrom   # reset_usb_boot fallback when the NS slot is empty
     hardware_flash # Phase 2b: flash_range_erase / flash_range_program
     hardware_sync  # Phase 2b: save_and_disable_interrupts around flash ops
-    hardware_spi   # Phase 2d: SPI1 to e-paper panel
-    pico_sha256    # Phase 4: SHA-256 hardware moved Secure-side
+    hardware_spi      # Phase 2d: SPI1 to e-paper panel
+    hardware_watchdog # Phase 7.3: watchdog_reboot after factory-wipe
+    pico_sha256       # Phase 4: SHA-256 hardware moved Secure-side
 )
 
 pico_set_linker_script(picowallet_secure

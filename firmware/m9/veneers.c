@@ -44,6 +44,7 @@
 
 #include "os/crypto/sha256.h"
 #include "os/crypto/monocypher.h"
+#include "os/crypto/bip39.h"
 #include "os/storage/seed_flash.h"
 #include "os/ui/pin_ui.h"
 
@@ -403,9 +404,7 @@ int s_hkdf_extract(const s_hkdf_extract_args_t *args) {
 static int do_pin_setup_internal(void) {
     if (m9_seed_flash_is_initialized()) return M9_PIN_ERR_ALREADY_SET;
 
-    // Loop until the operator enters matching PINs twice. Internal
-    // mismatch retry keeps the boot flow contained to a single veneer
-    // call.
+    // 1) Collect (and confirm) the PIN.
     char pin1[PIN_UI_MAX_DIGITS + 1];
     char pin2[PIN_UI_MAX_DIGITS + 1];
     int  n1, n2;
@@ -417,16 +416,33 @@ static int do_pin_setup_internal(void) {
         crypto_wipe(pin2, sizeof(pin2));
         pin_ui_show_status("Mismatch - retry");
     }
-
-    pin_ui_show_busy("Sealing...");
-    uint8_t placeholder[M9_SEALED_SEED_LEN];
-    m9_trng_fill(placeholder, sizeof(placeholder));
-
-    m9_sealed_seed_t blob;
-    int seal_rc = m9_seal_seed((const uint8_t *)pin1, (size_t)n1, placeholder, &blob);
-    crypto_wipe(pin1, sizeof(pin1));
     crypto_wipe(pin2, sizeof(pin2));
-    crypto_wipe(placeholder, sizeof(placeholder));
+
+    // 2) Generate a fresh BIP-39 mnemonic from 32B TRNG entropy. Walk
+    //    the operator through all 24 words (4 pages of 6) before we
+    //    derive + seal -- they MUST have written it down or recovery
+    //    after factory reset is impossible.
+    pin_ui_show_busy("Generating...");
+    uint8_t  entropy[BIP39_ENTROPY_BYTES];
+    uint16_t words[BIP39_MNEMONIC_WORDS];
+    m9_trng_fill(entropy, sizeof(entropy));
+    bip39_generate(entropy, words);
+    crypto_wipe(entropy, sizeof(entropy));
+
+    pin_ui_show_mnemonic(words);
+
+    // 3) Derive the 64-byte master seed via BIP-39 PBKDF2-HMAC-SHA512.
+    pin_ui_show_busy("Deriving seed...");
+    uint8_t seed[M9_SEALED_SEED_LEN];     // 64
+    bip39_to_seed(words, seed);
+    crypto_wipe(words, sizeof(words));
+
+    // 4) Seal the seed with the PIN-derived KEK + persist.
+    pin_ui_show_busy("Sealing...");
+    m9_sealed_seed_t blob;
+    int seal_rc = m9_seal_seed((const uint8_t *)pin1, (size_t)n1, seed, &blob);
+    crypto_wipe(pin1, sizeof(pin1));
+    crypto_wipe(seed, sizeof(seed));
     if (seal_rc != 0) {
         crypto_wipe(&blob, sizeof(blob));
         return M9_PIN_ERR_INTERNAL;
@@ -434,7 +450,7 @@ static int do_pin_setup_internal(void) {
     int rc = m9_seed_flash_store(&blob);
     crypto_wipe(&blob, sizeof(blob));
     if (rc != 0) return M9_PIN_ERR_INTERNAL;
-    pin_ui_show_status("PIN set");
+    pin_ui_show_status("Setup complete");
     return M9_PIN_OK;
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 #include <stddef.h>
+#include <stdint.h>
 
 // M9.5 Phase 7.2b -- Secure-side PIN entry UI.
 //
@@ -24,3 +25,11 @@ void pin_ui_show_busy(const char *msg);
 // Render a one-screen status (e.g. "PIN mismatch", "Unlocked"); blocks
 // briefly so the operator sees the message before the next prompt.
 void pin_ui_show_status(const char *msg);
+
+// Phase 7.3: walk the operator through the 24-word mnemonic in four
+// 6-word pages, forcing them to advance through each page (RIGHT button)
+// and confirm on the final page (BOTH). Used during PIN setup, when a
+// fresh mnemonic has just been generated and must be written down.
+//
+// `word_indices` is the 24-entry index array from bip39_generate.
+void pin_ui_show_mnemonic(const uint16_t word_indices[24]);
