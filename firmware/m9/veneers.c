@@ -418,18 +418,28 @@ static int do_pin_setup_internal(void) {
     }
     crypto_wipe(pin2, sizeof(pin2));
 
-    // 2) Generate a fresh BIP-39 mnemonic from 32B TRNG entropy. Walk
-    //    the operator through all 24 words (4 pages of 6) before we
-    //    derive + seal -- they MUST have written it down or recovery
-    //    after factory reset is impossible.
-    pin_ui_show_busy("Generating...");
-    uint8_t  entropy[BIP39_ENTROPY_BYTES];
-    uint16_t words[BIP39_MNEMONIC_WORDS];
-    m9_trng_fill(entropy, sizeof(entropy));
-    bip39_generate(entropy, words);
-    crypto_wipe(entropy, sizeof(entropy));
+    // 2) Choose generate vs restore.
+    int mode = pin_ui_setup_mode();
 
-    pin_ui_show_mnemonic(words);
+    uint16_t words[BIP39_MNEMONIC_WORDS];
+    if (mode == PIN_UI_SETUP_GENERATE) {
+        // Fresh mnemonic from 32B TRNG entropy. Walk the operator
+        // through all 24 words (4 pages of 6) BEFORE we derive + seal
+        // so they have a chance to write it down.
+        pin_ui_show_busy("Generating...");
+        uint8_t entropy[BIP39_ENTROPY_BYTES];
+        m9_trng_fill(entropy, sizeof(entropy));
+        bip39_generate(entropy, words);
+        crypto_wipe(entropy, sizeof(entropy));
+        pin_ui_show_mnemonic(words);
+    } else {
+        // Operator types in an existing 24-word mnemonic via buttons.
+        // pin_ui_restore_mnemonic validates the BIP-39 checksum; if it
+        // fails (typo), we loop and start again from word 1.
+        while (pin_ui_restore_mnemonic(words) != 0) {
+            crypto_wipe(words, sizeof(words));
+        }
+    }
 
     // 3) Derive the 64-byte master seed via BIP-39 PBKDF2-HMAC-SHA512.
     pin_ui_show_busy("Deriving seed...");

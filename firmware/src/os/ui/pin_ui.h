@@ -33,3 +33,23 @@ void pin_ui_show_status(const char *msg);
 //
 // `word_indices` is the 24-entry index array from bip39_generate.
 void pin_ui_show_mnemonic(const uint16_t word_indices[24]);
+
+// Phase 7.4: button-driven restore of an existing 24-word mnemonic.
+// Each word is entered via prefix-narrow: type 1-4 letters (a..z, with
+// backspace + "done"), with the live count of matching BIP-39 words
+// shown after each letter. When the prefix uniquely identifies a word
+// (count == 1) the device auto-advances; otherwise the operator hits
+// "done" to switch to candidate-pick mode and scrolls through the
+// remaining candidates.
+//
+// Returns 0 on success (and writes the 24 word indices to out_words);
+// returns -1 if the final mnemonic fails the BIP-39 checksum -- caller
+// is expected to retry from word 1.
+int pin_ui_restore_mnemonic(uint16_t out_words[24]);
+
+// Phase 7.4: ask the operator whether to generate a fresh mnemonic or
+// restore one from paper. Returns 0 for generate, 1 for restore.
+int pin_ui_setup_mode(void);
+
+#define PIN_UI_SETUP_GENERATE 0
+#define PIN_UI_SETUP_RESTORE  1
