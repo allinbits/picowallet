@@ -103,6 +103,8 @@ target_include_directories(picowallet PRIVATE
 target_link_libraries(picowallet
     pico_stdlib
     hardware_flash
+    hardware_dma   # dma_channel_claim(0) at boot reserves the channel
+                   # the Secure side LOCK'd as Secure-only.
     tinyusb_device
     tinyusb_board
     pico_unique_id
@@ -111,11 +113,19 @@ target_link_libraries(picowallet
     pico_lwip_nosys
     pico_lwip_core4
     pico_lwip_netif
-    # Hardware SHA-256 peripheral wrapper (RP2350)
-    pico_sha256
-    # Hardware TRNG-backed PRNG (RP2350)
+    # Hardware TRNG-backed PRNG (RP2350). Under TZ the ROSC sampler is
+    # bypassed via the LWIP_RAND override and TRNG access is via veneer,
+    # but pico_rand stays linked so the symbols (get_rand_*) exist for
+    # any straggler caller. Phase 4 keeps it; remove once that's verified.
     pico_rand
 )
+
+# Hardware SHA-256 wrapper: NS-linked only when not in TZ. Under TZ the
+# whole SHA-256 path moved into the Secure image (firmware/m9/CMakeLists.txt)
+# and NS reaches it through s_hkdf_extract / s_hkdf_expand.
+if(NOT PICOWALLET_TRUSTZONE)
+    target_link_libraries(picowallet pico_sha256)
+endif()
 
 # Pre-TZ single-image build: keep the e-paper code in the same target.
 # Under TZ this lives in picowallet_secure instead (see m9/CMakeLists.txt).

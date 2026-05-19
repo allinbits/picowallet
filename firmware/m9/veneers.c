@@ -42,6 +42,8 @@
 
 #include "hardware/clocks.h"
 
+#include "os/crypto/sha256.h"
+
 // Phase 2c: signing veneers reach into Secure-side keystore.c which has
 // the seed + SLIP-10 + Ed25519 + SHA-512 (all compiled only into the
 // Secure target via PICOWALLET_SECURE_BUILD).
@@ -409,6 +411,71 @@ __attribute__((cmse_nonsecure_entry))
 uint32_t s_clock_get_hz(uint8_t clock_idx) {
     if (clock_idx >= CLK_COUNT) return 0;
     return clock_get_hz((clock_handle_t)clock_idx);
+}
+
+// --- Phase 4: SHA-256 HKDF veneers --------------------------------------
+//
+// NS's only SHA-256 surface today is HKDF in derive_keys() (common
+// SecretConnection). Expose the two HKDF ops only; sha256() and
+// hmac_sha256() have no NS callers so they get no veneers. Argument
+// structs because cmse_nonsecure_entry caps at 4 register args.
+#define M9_HKDF_MAX_LEN 4096u
+
+__attribute__((cmse_nonsecure_entry))
+int s_hkdf_extract(const s_hkdf_extract_args_t *args) {
+    if (!args) return M9_NEG_PTR;
+    const s_hkdf_extract_args_t *a = cmse_check_address_range(
+        (void *)args, sizeof(*args), CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!a) return M9_NEG_PTR;
+    s_hkdf_extract_args_t v = *a;
+
+    if (!v.ikm || !v.prk) return M9_NEG_PTR;
+    if (v.ikm_len == 0 || v.ikm_len > M9_HKDF_MAX_LEN) return M9_NEG_RANGE;
+    if (v.salt_len > M9_HKDF_MAX_LEN) return M9_NEG_RANGE;
+
+    if (v.salt) {
+        if (!cmse_check_address_range((void *)v.salt, v.salt_len,
+                                      CMSE_NONSECURE | CMSE_MPU_READ)) return M9_NEG_PTR;
+    } else if (v.salt_len != 0) {
+        return M9_NEG_PTR;
+    }
+    if (!cmse_check_address_range((void *)v.ikm, v.ikm_len,
+                                  CMSE_NONSECURE | CMSE_MPU_READ)) return M9_NEG_PTR;
+    if (!cmse_check_address_range(v.prk, 32,
+                                  CMSE_NONSECURE | CMSE_MPU_READWRITE)) return M9_NEG_PTR;
+
+    hkdf_extract(v.salt, v.salt_len, v.ikm, v.ikm_len, v.prk);
+    return 0;
+}
+
+__attribute__((cmse_nonsecure_entry))
+int s_hkdf_expand(const s_hkdf_expand_args_t *args) {
+    if (!args) return M9_NEG_PTR;
+    const s_hkdf_expand_args_t *a = cmse_check_address_range(
+        (void *)args, sizeof(*args), CMSE_NONSECURE | CMSE_MPU_READ);
+    if (!a) return M9_NEG_PTR;
+    s_hkdf_expand_args_t v = *a;
+
+    if (!v.prk || !v.okm) return M9_NEG_PTR;
+    if (v.prk_len == 0 || v.prk_len > M9_HKDF_MAX_LEN) return M9_NEG_RANGE;
+    if (v.okm_len == 0 || v.okm_len > M9_HKDF_MAX_LEN) return M9_NEG_RANGE;
+    // hkdf_expand's stack buffer caps info_len at 128 internally; mirror
+    // that here so a bogus NS value can't make us deref into Secure mem.
+    if (v.info_len > 128u) return M9_NEG_RANGE;
+
+    if (!cmse_check_address_range((void *)v.prk, v.prk_len,
+                                  CMSE_NONSECURE | CMSE_MPU_READ)) return M9_NEG_PTR;
+    if (v.info) {
+        if (!cmse_check_address_range((void *)v.info, v.info_len,
+                                      CMSE_NONSECURE | CMSE_MPU_READ)) return M9_NEG_PTR;
+    } else if (v.info_len != 0) {
+        return M9_NEG_PTR;
+    }
+    if (!cmse_check_address_range(v.okm, v.okm_len,
+                                  CMSE_NONSECURE | CMSE_MPU_READWRITE)) return M9_NEG_PTR;
+
+    hkdf_expand(v.prk, v.prk_len, v.info, v.info_len, v.okm, v.okm_len);
+    return 0;
 }
 
 __attribute__((cmse_nonsecure_entry))

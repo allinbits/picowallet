@@ -173,6 +173,35 @@ bool s_input_pressed(uint8_t btn);
 // TRNG entropy. NS uses this for SC ephemerals.
 int s_random(uint8_t *out, size_t n);
 
+// --- SHA-256 (Phase 4) --------------------------------------------------
+//
+// SHA-256 hardware (and the bootlock it shares) is Secure-only now. The
+// only NS-side callers are the SecretConnection HKDF derivation, so
+// expose just hkdf_extract + hkdf_expand and skip the raw sha256 /
+// hmac_sha256 surface. Args are packed because cmse_nonsecure_entry
+// allows at most 4 register-sized parameters.
+
+typedef struct {
+    const uint8_t *salt;     // may be NULL with salt_len=0 (RFC 5869)
+    size_t         salt_len;
+    const uint8_t *ikm;
+    size_t         ikm_len;
+    uint8_t       *prk;      // 32 bytes
+} s_hkdf_extract_args_t;
+
+int s_hkdf_extract(const s_hkdf_extract_args_t *args);
+
+typedef struct {
+    const uint8_t *prk;
+    size_t         prk_len;
+    const uint8_t *info;
+    size_t         info_len;
+    uint8_t       *okm;
+    size_t         okm_len;
+} s_hkdf_expand_args_t;
+
+int s_hkdf_expand(const s_hkdf_expand_args_t *args);
+
 // Read a clock frequency from the Secure-side software cache. After
 // Phase 4 NS no longer runs runtime_init_clocks (CLOCKS / XOSC / PLLs
 // are locked Secure-only), so its own pico-sdk clock_get_hz cache is

@@ -258,9 +258,17 @@ static void m9_accessctrl_open_for_ns(void) {
     r[0xCC / 4u] = PW | 0xFCu;   // ACCESSCTRL_PLL_SYS
     r[0xD0 / 4u] = PW | 0xFCu;   // ACCESSCTRL_PLL_USB
 
-    // DMA channel partition. ACCESSCTRL_DMA stays open to NS (NS still
-    // uses dma for pico_sha256 until task #22 ships); per-channel
-    // SECCFG_CHn is the finer-grained gate. Reserve channel 0 for the
+    // SHA-256 hardware (Phase 4). The peripheral + its bootlock at
+    // 0x400E080C are Secure-only now -- all SHA-256 in firmware lives
+    // in Secure (sha256.c moved into picowallet_secure) and NS reaches
+    // HKDF via s_hkdf_extract / s_hkdf_expand veneers. The pico_sha256
+    // SDK wrapper is no longer linked into the NS image.
+    r[0xB8 / 4u] = PW | 0xFCu;   // ACCESSCTRL_SHA256
+
+    // DMA channel partition. ACCESSCTRL_DMA stays open to NS so NS
+    // can still drive any DMA needs that arise (none today after
+    // pico_sha256 moved Secure-side). Per-channel SECCFG_CHn is the
+    // finer-grained gate. Reserve channel 0 for the
     // Secure side (future SHA / SPI / flash users) by setting
     // SECCFG_CH0 = S=1 + P=1 + LOCK=1 -- once LOCK is set the
     // attribution cannot be modified until reset, so NS cannot

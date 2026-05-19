@@ -1,18 +1,52 @@
+#include "os/crypto/sha256.h"
+
+#if PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD
+
+// NS build under M9 TrustZone -- the SHA-256 hardware peripheral is
+// Secure-only (Phase 4) and only HKDF is invoked from NS today, so we
+// expose just hkdf_extract / hkdf_expand as thin wrappers over the
+// Secure veneers. sha256() and hmac_sha256() are intentionally
+// undefined here; if a new NS caller appears the link error will
+// flag it.
+
+#include "os/secure_api.h"
+
+void hkdf_extract(const uint8_t *salt, size_t salt_len,
+                  const uint8_t *ikm,  size_t ikm_len,
+                  uint8_t prk[SHA256_OUT_LEN]) {
+    s_hkdf_extract_args_t args = {
+        .salt = salt, .salt_len = salt_len,
+        .ikm  = ikm,  .ikm_len  = ikm_len,
+        .prk  = prk,
+    };
+    s_hkdf_extract(&args);
+}
+
+void hkdf_expand(const uint8_t *prk,  size_t prk_len,
+                 const uint8_t *info, size_t info_len,
+                 uint8_t *okm, size_t okm_len) {
+    s_hkdf_expand_args_t args = {
+        .prk      = prk,  .prk_len  = prk_len,
+        .info     = info, .info_len = info_len,
+        .okm      = okm,  .okm_len  = okm_len,
+    };
+    s_hkdf_expand(&args);
+}
+
+#else
+
 #include <string.h>
 
 #include "pico/sha256.h"
 
-#include "os/crypto/sha256.h"
-
 #define SHA256_BLOCK_LEN 64
 
 #if PICOWALLET_TRUSTZONE
-// Override pico_sha256's weak lock/unlock. The SDK's version goes through
-// bootrom_try_acquire_lock which writes to a BOOTRAM bootlock register at
-// 0x400E080C; that region is Secure-only on RP2350, so NS faults with a
-// precise BusFault. PicoWallet's NS image is single-core + single-threaded,
-// so we don't need cross-master coordination on the SHA-256 peripheral.
-// ACCESSCTRL_SHA256 is opened to NS in the Secure stub.
+// Secure-side override of pico_sha256's weak lock/unlock. The SDK's
+// version goes through bootrom_try_acquire_lock which writes to the
+// BOOTRAM bootlock at 0x400E080C. After Phase 4 SHA-256 has exactly
+// one master (the Secure stub, single-threaded), so the bootlock is
+// unnecessary overhead -- treat as a software-only flag.
 bool pico_sha256_lock(pico_sha256_state_t *state) {
     state->locked = true;
     return true;
@@ -24,8 +58,6 @@ void pico_sha256_unlock(pico_sha256_state_t *state) {
 
 static void sha256_oneshot(const uint8_t *data, size_t len, uint8_t out[SHA256_OUT_LEN]) {
     pico_sha256_state_t st;
-    // Claim the peripheral; block until available. Single-threaded firmware,
-    // so contention is impossible in practice, but be defensive.
     while (pico_sha256_try_start(&st, SHA256_BIG_ENDIAN, false) != PICO_OK) {
         tight_loop_contents();
     }
@@ -58,7 +90,6 @@ void hmac_sha256(const uint8_t *key,  size_t key_len,
         opad[i] = k[i] ^ 0x5C;
     }
 
-    // inner = SHA256(ipad || data)
     pico_sha256_state_t st;
     while (pico_sha256_try_start(&st, SHA256_BIG_ENDIAN, false) != PICO_OK) {
         tight_loop_contents();
@@ -68,7 +99,6 @@ void hmac_sha256(const uint8_t *key,  size_t key_len,
     sha256_result_t inner;
     pico_sha256_finish(&st, &inner);
 
-    // outer = SHA256(opad || inner)
     while (pico_sha256_try_start(&st, SHA256_BIG_ENDIAN, false) != PICO_OK) {
         tight_loop_contents();
     }
@@ -83,7 +113,6 @@ void hmac_sha256(const uint8_t *key,  size_t key_len,
 void hkdf_extract(const uint8_t *salt, size_t salt_len,
                   const uint8_t *ikm,  size_t ikm_len,
                   uint8_t prk[SHA256_OUT_LEN]) {
-    // RFC 5869: if salt is empty, use 32 zero bytes.
     static const uint8_t zero_salt[SHA256_OUT_LEN] = {0};
     if (salt == NULL || salt_len == 0) {
         hmac_sha256(zero_salt, SHA256_OUT_LEN, ikm, ikm_len, prk);
@@ -100,8 +129,6 @@ void hkdf_expand(const uint8_t *prk,  size_t prk_len,
     size_t   pos    = 0;
     uint8_t  counter = 1;
 
-    // T(N) = HMAC(prk, T(N-1) || info || N). Materialize the concatenation
-    // in a stack buffer; caller must ensure info_len <= 128 (caps total at 161).
     uint8_t  buf[SHA256_OUT_LEN + 128 + 1];
     while (pos < okm_len) {
         size_t buf_len = 0;
@@ -124,3 +151,5 @@ void hkdf_expand(const uint8_t *prk,  size_t prk_len,
         pos += take;
     }
 }
+
+#endif  // PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD

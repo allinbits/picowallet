@@ -20,6 +20,11 @@ add_executable(picowallet_secure
     ../src/os/crypto/keystore.c
     ../src/os/crypto/monocypher-ed25519.c
     ../src/os/crypto/monocypher.c
+    # Phase 4: SHA-256 hardware moves to Secure. NS hits the s_hkdf_*
+    # veneers (only HKDF was called from NS in the SecretConnection
+    # path). The sha256() / hmac_sha256() impls live here too -- they
+    # are reused by hkdf_extract / hkdf_expand on this side.
+    ../src/os/crypto/sha256.c
     # Phase 2c3: HWM cache + chain config also move to Secure so the
     # HWM strict-advance check fuses with the sign in one veneer call
     # (s_sign_and_advance). The NS-side copies of these are still
@@ -97,6 +102,7 @@ target_link_libraries(picowallet_secure
     hardware_flash # Phase 2b: flash_range_erase / flash_range_program
     hardware_sync  # Phase 2b: save_and_disable_interrupts around flash ops
     hardware_spi   # Phase 2d: SPI1 to e-paper panel
+    pico_sha256    # Phase 4: SHA-256 hardware moved Secure-side
 )
 
 pico_set_linker_script(picowallet_secure
