@@ -489,8 +489,8 @@ static int do_pin_setup_internal(void) {
     pin_ui_show_busy("Sealing...");
     m9_sealed_seed_t blob;
     int seal_rc = m9_seal_seed((const uint8_t *)pin1, (size_t)n1, seed, &blob);
-    crypto_wipe(seed, sizeof(seed));
     if (seal_rc != 0) {
+        crypto_wipe(seed, sizeof(seed));
         crypto_wipe(pin1, sizeof(pin1));
         crypto_wipe(&blob, sizeof(blob));
         return M9_PIN_ERR_INTERNAL;
@@ -498,12 +498,15 @@ static int do_pin_setup_internal(void) {
     int rc = m9_seed_flash_store(&blob);
     crypto_wipe(&blob, sizeof(blob));
     if (rc != 0) {
+        crypto_wipe(seed, sizeof(seed));
         crypto_wipe(pin1, sizeof(pin1));
         return M9_PIN_ERR_INTERNAL;
     }
-    // Cache the PIN so the operator doesn't have to re-enter to use
-    // per-slot overrides on this same boot.
+    // Cache the PIN + master seed Secure-side so the signing path and
+    // per-slot overrides work on this same boot without re-prompting.
+    m9_master_seed_set(seed);
     m9_pin_cache_set((const uint8_t *)pin1, (size_t)n1);
+    crypto_wipe(seed, sizeof(seed));
     crypto_wipe(pin1, sizeof(pin1));
     pin_ui_show_status("Setup complete");
     return M9_PIN_OK;
@@ -531,10 +534,10 @@ int s_pin_unlock(void) {
     uint8_t plaintext[M9_SEALED_SEED_LEN];
     const m9_sealed_seed_t *blob = m9_seed_flash_load();
     int unseal_rc = m9_unseal_seed((const uint8_t *)pin, (size_t)n, blob, plaintext);
-    crypto_wipe(pin, sizeof(pin));
-    crypto_wipe(plaintext, sizeof(plaintext));
 
     if (unseal_rc != 0) {
+        crypto_wipe(pin, sizeof(pin));
+        crypto_wipe(plaintext, sizeof(plaintext));
         if (m9_pin_attempts() >= M9_PIN_MAX_ATTEMPTS) {
             m9_factory_wipe_all();
             pin_ui_show_status("WIPED");
@@ -544,10 +547,13 @@ int s_pin_unlock(void) {
         return M9_PIN_ERR_BAD_PIN;
     }
     m9_pin_attempt_reset();
-    // Cache the PIN Secure-side so the per-slot override unseal path
-    // (Phase 7.5) can decrypt slot blobs at sign time without
-    // re-prompting.
+    // Cache the master seed + PIN Secure-side. The DERIVED signing
+    // path (Phase 7.6) reads from the master cache; per-slot override
+    // unseals re-derive the KEK from the cached PIN.
+    m9_master_seed_set(plaintext);
     m9_pin_cache_set((const uint8_t *)pin, (size_t)n);
+    crypto_wipe(pin,       sizeof(pin));
+    crypto_wipe(plaintext, sizeof(plaintext));
     return M9_PIN_OK;
 }
 

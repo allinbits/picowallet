@@ -11,6 +11,7 @@
 #include "hardware/sync.h"
 #include "pico/platform.h"
 
+#include "os/crypto/keystore.h"      // m9_master_seed_clear
 #include "os/crypto/monocypher.h"
 #include "os/storage/chains.h"
 #include "os/storage/flash_layout.h"
@@ -274,6 +275,7 @@ void m9_factory_wipe_all(void) {
     chains_wipe();
     hwm_flash_wipe();
     m9_pin_cache_clear();
+    m9_master_seed_clear();
 }
 
 #endif  // PICOWALLET_SECURE_BUILD

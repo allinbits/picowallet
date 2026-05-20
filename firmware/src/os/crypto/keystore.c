@@ -52,18 +52,34 @@ const char *os_crypto_status_str(int s) {
 // seed. The same code path also services the SG veneers in veneers.c via
 // keystore_derive_pubkey / keystore_sign.
 // ============================================================================
+#include "os/crypto/monocypher.h"           // crypto_wipe
 #include "os/crypto/monocypher-ed25519.h"
 
 // ============================================================================
-// TEST FIXTURE seed. M9.5 replaces this with seed unwrapped from encrypted
-// flash using the PIN. Do NOT use this build for real funds.
+// M9.5 master-seed cache. Filled by m9_master_seed_set after the PIN-unlock /
+// PIN-setup flow unseals the on-flash blob; cleared by m9_master_seed_clear
+// on factory wipe. The DERIVED signing path uses this; until unlocked, the
+// signing path fails closed.
 // ============================================================================
-static const uint8_t TEST_SEED[32] = {
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-    0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
-};
+#define MASTER_SEED_LEN 64u
+static uint8_t  s_master_seed[MASTER_SEED_LEN];
+static bool     s_master_seed_loaded = false;
+
+void m9_master_seed_set(const uint8_t seed[MASTER_SEED_LEN]) {
+    if (!seed) {
+        m9_master_seed_clear();
+        return;
+    }
+    memcpy(s_master_seed, seed, MASTER_SEED_LEN);
+    s_master_seed_loaded = true;
+}
+
+void m9_master_seed_clear(void) {
+    crypto_wipe(s_master_seed, MASTER_SEED_LEN);
+    s_master_seed_loaded = false;
+}
+
+bool m9_master_seed_loaded(void) { return s_master_seed_loaded; }
 
 // Per SLIP-10 spec for Ed25519.
 static const char SLIP10_ED25519_MASTER[] = "ed25519 seed";
@@ -107,17 +123,12 @@ static int parse_path(const char *path, uint32_t *out, size_t out_max) {
 }
 
 // ---------------------------------------------------------------------------
-// SLIP-10 Ed25519: master + single child step.
-// `node` is a 64-byte buffer: first 32 = private key, last 32 = chain code.
-// ---------------------------------------------------------------------------
-static void slip10_ed25519_master(uint8_t node[64]) {
-    crypto_sha512_hmac(node,
-                       (const uint8_t *)SLIP10_ED25519_MASTER,
-                       sizeof(SLIP10_ED25519_MASTER) - 1,
-                       TEST_SEED, sizeof(TEST_SEED));
-}
-
+// SLIP-10 Ed25519 single child step. The master step is now inlined in
+// derive_ed25519_from_seed (Phase 7.6) so the seed is a function
+// parameter instead of TEST_SEED.
+//
 // `index` must be hardened (high bit set), else returns ERR_NON_HARDENED.
+// ---------------------------------------------------------------------------
 static int slip10_ed25519_step(uint8_t node[64], uint32_t index) {
     if ((index & 0x80000000u) == 0) return KEYSTORE_ERR_NON_HARDENED;
     uint8_t data[37];
@@ -166,11 +177,14 @@ static int derive_ed25519_from_seed(const uint8_t *seed, size_t seed_len,
     return KEYSTORE_OK;
 }
 
-// Master-seed wrapper: keeps the pre-7.5 derivation path working
-// against the hardcoded TEST_SEED.
+// Master-seed wrapper: derives from the unlocked BIP-39 master seed.
+// Fails with KEYSTORE_ERR_BAD_PATH if the device hasn't been unlocked
+// yet (no seed loaded -- the DERIVED signing path is unreachable
+// pre-unlock).
 static int derive_ed25519(const char *path,
                           uint8_t secret_key[64], uint8_t public_key[32]) {
-    return derive_ed25519_from_seed(TEST_SEED, sizeof(TEST_SEED),
+    if (!s_master_seed_loaded) return KEYSTORE_ERR_BAD_PATH;
+    return derive_ed25519_from_seed(s_master_seed, MASTER_SEED_LEN,
                                     path, secret_key, public_key);
 }
 
