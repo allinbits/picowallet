@@ -151,12 +151,31 @@ Reboot to switch.
 
 ```
 0x000000  ┌──────────────────────────────────────┐
-          │  Firmware image (≈170 KB today)       │
+          │  Secure image (≈140 KB, M9 stub +    │
+          │   crypto + storage + UI + veneers)    │
+          ├──────────────────────────────────────┤
+          │  NSC veneer page (4 KB at 0x07F000)   │
+          │   • SG-instruction stubs for every    │
+          │     cmse_nonsecure_entry              │
+0x080000  ├──────────────────────────────────────┤
+          │  Non-Secure image (≈400 KB)           │
           │   bootloader + .text + .rodata + …    │
           ├──────────────────────────────────────┤
           │  Unused / growth                      │
+0x2EE000  ├──────────────────────────────────────┤
+          │  SLOT_SEEDS (64 KB)                   │
+          │   • 16 × 4 KB sectors, one per slot   │
+          │   • each holds an AEAD-sealed slot    │
+          │     seed override (MNEMONIC or       │
+          │     RAW_KEY); blank ⇒ DERIVED         │
+0x2FE000  ├──────────────────────────────────────┤
+          │  SEED (4 KB sector)                   │
+          │   • page 0: magic + version +        │
+          │     m9_sealed_seed_t (master)         │
+          │   • pages 1..10: PIN attempt counter  │
+          │     (thermometer encoding)            │
 0x2FF000  ├──────────────────────────────────────┤
-          │  Chain config   (4 KB sector)         │
+          │  Chain config (4 KB sector)           │
           │   • cosmos[8] + gno[8] slots          │
           │   • label / chain_id / host / port    │
           │   • optional pinned peer pubkey       │
@@ -170,6 +189,8 @@ Reboot to switch.
 ```
 
 `firmware/src/os/storage/flash_layout.h` keeps the offsets in one place.
+All four persistent regions (SEED, SLOT_SEEDS, CHAINS, HWM) are erased
+by `m9_factory_wipe_all` on factory reset.
 
 ---
 
@@ -329,7 +350,7 @@ chain B.
   regardless of how many other chains are configured (real flash 2-5×
   → 20-45y in practice).
 
-### ◐ M9 — TrustZone-M split (Ledger-style)
+### ✓ M9 — TrustZone-M split (Ledger-style)
 
 Goal: hold the seed, all destructive state mutations, and the
 user-consent path (display + buttons) in the Secure world so a full
@@ -353,24 +374,27 @@ security-relevant decision.
 | 8 | Voltage / clock / EM glitching | Out of scope. |
 | 9 | Power / timing side channel | Monocypher is constant-time; specialised side-channel hardening is out of scope. |
 
-#### M9.1 — Boundary
+#### M9.1 — Boundary (as shipped)
 
 | | Secure | Non-Secure |
 |---|---|---|
-| Seed + SLIP-10 + Ed25519 *sign* + SHA-512 | ✓ | |
-| HWM table — **writes** | ✓ | reads via memory-mapped flash (data isn't secret) |
-| Chain config table — **writes** | ✓ | reads via memory-mapped flash |
-| Flash program/erase | ✓ (only Secure can mutate any flash region) | |
-| Display SPI peripheral + e-paper driver | ✓ — owns the panel; trusted prompts and console rendering both flow through Secure | |
-| Button GPIO + debounced events | ✓ — Secure polls inside confirm flows; otherwise forwards event taps to NS via a non-trusted veneer | |
-| TRNG, hardware SHA-256 peripheral | ✓ — Secure-only access in ACCESSCTRL | NS gets entropy via `s_random()` veneer |
+| Seed (master) + SLIP-10 + Ed25519 *sign* + SHA-512 | ✓ | |
+| Per-slot seed override (mnemonic / raw-key) | ✓ — sealed under PIN-derived KEK; see M9.5 | |
+| HWM table — **writes** + reads (cache) | ✓ | NS shim forwards writes via flash veneers |
+| Chain config table — **writes** + reads (cache) | ✓ | NS shim forwards writes via flash veneers |
+| Flash program/erase | ✓ — bootrom flash ops + ACCESSCTRL lockdown of the storage region | |
+| Display SPI peripheral + e-paper driver + framebuffer + Pico_ePaper library | ✓ — SPI1 locked Secure-only; GPIO_NSMASK bits 8..13 cleared from NS | |
+| Trusted UI screens (splash, mode-select, console, confirm, PIN entry, mnemonic display + restore, factory-reset countdown) | ✓ — Secure-rendered + Secure-polled buttons | |
+| Button GPIO reads | ✓ — `s_input_pressed` direct SIO read; NS shim forwards | NS sees button state only through the veneer |
+| TRNG, hardware SHA-256 peripheral, OTP, POWMAN, WATCHDOG, CLOCKS / XOSC / ROSC / PLLs | ✓ — ACCESSCTRL Secure-only after Phase 4 | NS gets entropy via `s_random()`, HKDF via `s_hkdf_*`, clock freqs via `s_clock_get_hz` |
+| DMA channel 0 | ✓ — SECCFG_CH0 S=1 + LOCK=1 | NS uses channels 1..15 |
 | LED (liveness blink) | | ✓ (cosmetic only) |
-| TinyUSB + CDC-ECM driver | | ✓ |
-| lwIP + ECM netif | | ✓ |
-| SC handshake (X25519, ChaCha20-Poly1305, HKDF, Ed25519 *verify*) | | ✓ |
+| TinyUSB + CDC-ECM/CDC-ACM | | ✓ |
+| lwIP + ECM netif | | ✓ (LWIP_RAND routed through `s_random`; no NS pico_rand path) |
+| SC handshake (X25519, ChaCha20-Poly1305, HKDF *via veneer*, Ed25519 *verify*) | | ✓ |
 | Privval parsers (cosmos protobuf, gno amino) + canonical sign-bytes extraction | | ✓ |
-| REPL line dispatcher | | ✓ — invokes Secure veneers for state-changing commands |
-| Console line buffer (text content) | | ✓ — rendered by Secure |
+| REPL line dispatcher | | ✓ — state-changing commands route through Secure veneers |
+| Console history buffer (text content) | ✓ — stored Secure-side; rendered Secure-side | NS pushes lines via `s_console_log` |
 
 NS keeps its own copy of Monocypher (X25519, ChaCha20-Poly1305,
 Ed25519 verify, SHA-256). Ed25519 *sign* + SHA-512 only exist in the
@@ -384,259 +408,296 @@ Trusted prompts are drawn exclusively by Secure into a reserved
 top-of-screen region; NS cannot influence what's shown during a
 Secure prompt and cannot drive the display peripheral itself.
 
-#### M9.2 — Secure-callable veneer (NSC ABI)
+#### M9.2 — Secure-callable veneer (NSC ABI, as shipped)
+
+Authoritative declarations live in `firmware/src/os/secure_api.h`.
+Summary (NS-callable, all in the `.gnu.sgstubs` section in Secure flash):
 
 ```c
 // --- Crypto + signing -----------------------------------------------------
-int  s_get_pubkey(uint8_t curve, const char *path,
-                  uint8_t *out, size_t out_size, size_t *out_len);
+int  s_get_pubkey(uint8_t curve, const char *path, uint8_t out_pubkey[32]);
 
-// Sign the 32-byte SecretConnection challenge. Length-locked at 32 so
-// this veneer cannot be abused to sign privval messages outside the
-// HWM-gated path below.
+// Length-locked at 32B so it can't be turned into a generic oracle.
 int  s_sign_sc_challenge(uint8_t curve, const char *path,
                          const uint8_t challenge[32], uint8_t out_sig[64]);
 
-// Atomic: validate strict-advance against the slot's HWM, append the
-// new HWM record, sign the canonical bytes, return the signature.
-// Secure looks up the slot's chain_id internally (NS cannot lie about
-// it). Returns 0 on success; -1 if HWM rejected; negative status_t on
-// other failures.
-int  s_sign_and_advance(uint8_t curve, const char *path,
-                        uint8_t hwm_slot_idx,
-                        int32_t type, int64_t height, int32_t round,
-                        const uint8_t *data, size_t data_len,
-                        uint8_t out_sig[64]);
+// Atomic HWM-check + sign. Args packed into a struct because
+// cmse_nonsecure_entry caps at 4 register-sized parameters. Secure
+// looks up the slot's chain_id internally; NS cannot lie about it.
+int  s_sign_and_advance(const s_sign_and_advance_args_t *args);
 
-// --- Chain config mutations ----------------------------------------------
-// Called by the NS REPL dispatcher when the operator issues
-// os.{cosmos,gno}.chain.{add,remove} / os.chain.wipe. Some mutations
-// (chain.add with destructive defaults, factory reset) escalate to a
-// Secure-drawn confirm prompt; see the s_*_with_consent helpers below.
-int  s_chains_add(uint8_t family, const char *label, const char *chain_id,
-                  const uint8_t dial_host[4], uint16_t port,
-                  const uint8_t *pinned_key /*32B or NULL*/);
-bool s_chains_remove(uint8_t family, const char *label);
-void s_chains_wipe(void);
-void s_hwm_wipe(void);
+// --- TRNG + HKDF (M9 Phase 4 narrowing) ----------------------------------
+int  s_random(uint8_t *out, size_t n);
+int  s_hkdf_extract(const s_hkdf_extract_args_t *args);
+int  s_hkdf_expand (const s_hkdf_expand_args_t  *args);
 
-// --- Trusted UI primitives -----------------------------------------------
-// Each one draws into the reserved trusted-prompt region of the
-// display, polls buttons Secure-side, and returns the result. NS
-// cannot influence what's shown.
-bool s_factory_reset_with_consent(void);
+// --- Flash writes (Secure-only on RP2350; NS shims forward here) ---------
+int  s_flash_write_chains_page (const void *page, size_t len);
+int  s_flash_write_hwm_page    (uint8_t slot_idx, uint16_t page_in_slot,
+                                const void *page, size_t len);
+int  s_flash_erase_hwm_slot    (uint8_t slot_idx);
+int  s_flash_erase_hwm_sector  (uint8_t slot_idx, uint8_t sector_in_slot);
+int  s_flash_erase_hwm_all     (void);
 
-// --- Display + input (low-trust veneers for the NS console) ---------------
-// NS provides up to N text lines to render in the console region.
-// Secure refuses to draw if a trusted prompt is currently active.
-void s_console_render_lines(const char * const *lines, size_t n);
-// True if the corresponding button is currently held. NS uses this
-// only for non-consent decisions (mode-select prompt at boot, factory
-// reset trigger detection). NEVER for confirming destructive actions.
-bool s_input_pressed(uint8_t btn);
+// --- Trusted UI / display / input -----------------------------------------
+void s_display_init     (void);
+void s_splash_render    (void);
+void s_console_init     (void);
+void s_console_log      (const char *line, size_t len);
+void s_console_clear_history(void);
+void s_console_render   (void);          // fast LUT
+void s_console_render_clean(void);       // multi-pass clean
+bool s_console_is_dirty (void);
+uint8_t s_mode_select_prompt(void);      // returns os_mode_t
+bool s_factory_reset_with_consent(void); // 5s-hold + 3s countdown
+bool s_input_pressed    (uint8_t btn);   // 0 = LEFT, 1 = RIGHT
 
-// --- Utility --------------------------------------------------------------
-int  s_random(uint8_t *out, size_t n);     // TRNG; used by NS for SC ephemerals
-const char *s_status_str(int status);
+// --- M9.5: PIN / per-slot seed override ----------------------------------
+int     s_pin_setup     (void);   // Secure-driven UI; no NS args
+int     s_pin_unlock    (void);
+bool    s_pin_is_initialized(void);
+uint8_t s_pin_attempts  (void);
+
+uint8_t s_slot_seed_source(uint8_t slot_idx);   // 0=DERIVED, 1=MNEMONIC, 2=RAW_KEY
+int     s_slot_setup_mnemonic(uint8_t slot_idx);
+int     s_slot_import_raw_key(uint8_t slot_idx, const uint8_t priv32[32]);
+int     s_slot_clear_override(uint8_t slot_idx);
+
+uint32_t s_clock_get_hz(uint8_t clock_idx);     // NS skips runtime_init_clocks
 ```
 
-The old `os_crypto_sign` becomes a thin NS-side wrapper around
-`s_sign_and_advance`. Existing app/driver code (`privval.c`,
-`sc_driver_*.c`) does not change shape — only the symbol it calls
-through. `hwm_advance` on the NS side disappears (callers always
-fuse with the sign op).
+`os_crypto_sign` is a thin NS shim. The non-fused path (`s_sign_privval`)
+that existed in early Phase 2 was retired in Phase 5: NS-side
+`os_crypto_sign` accepts only 32-byte data (the SC challenge), and
+privval canonical sign-bytes must go through `s_sign_and_advance`
+directly. `s_chains_*` veneers were planned but never shipped — NS's
+chain-config writes go through the page-level `s_flash_write_chains_page`
+veneer, with chain validation living in NS's own (read-only)
+`chains_add` / `chains_remove` callers. The Secure side keeps its own
+chain + HWM cache for the signing dispatch path and re-reads from
+flash on boot.
 
-#### M9.3 — Implementation phases
+#### M9.3 — Implementation phases (as shipped)
 
 `pico-sdk` 2.2.0 ships SAU + ACCESSCTRL register definitions and the
 Cortex-M33 CMSIS core header, but *no* middleware: no NSC veneer
 helpers, no S/NS linker script template, no example apps. The split
-is built from scratch on top of those primitives.
+is built from scratch on top of those primitives. Six phases landed:
 
-- **Phase 0 — Boundary hygiene.** Confirm that no app/transport code
-  reaches into the keystore or Monocypher signing functions outside of
-  `os_crypto_*`. (Done: only `bench.c` calls `crypto_ed25519_*`
-  directly with a local seed, which is fine.) Lock down the veneer
-  ABI above as the M9 contract.
+- **Phase 1 — Secure-owned bring-up + minimal NS runtime.** Dual-ELF
+  build (`picowallet_secure.elf` at 0x10000000, `picowallet.elf` at
+  0x10080000), SAU R0..R4 programmed by the Secure stub, ACCESSCTRL
+  open to NS, bootrom-state-reset + `runtime_init_*` calls all run
+  Secure-side before BXNS. NS uses pico-sdk's crt0 with
+  `PICO_RUNTIME_SKIP_INIT_*` for every bootrom-touching initializer.
+  Empty `__init_array` on the NS side suppresses `pico_unique_id`'s
+  constructor. NSACR + CPACR_NS opened for CP0 (gpioc) + CP4/CP7 (RCP).
+  IRQs routed NS-side via NVIC_ITNS[0..15] = 0xFFFFFFFF.
+- **Phase 2 — NSC veneer entries.** SG stubs in `.gnu.sgstubs`
+  (renamed from the placeholder `.nsc` once GCC's linker requirement
+  was found). Every NS pointer arg validated with
+  `cmse_check_address_range`. Phase 2 covers all of the §M9.2 ABI
+  except the M9.5-specific veneers, which landed in Phase 7.
+- **Phase 3 — Build system.** Two-ELF CMake build, `merge_uf2.py`
+  packaging, openocd-based flashing via the Pi Debug Probe, Makefile
+  targets `m9-build` / `m9-attach` / `m9-attach-ns` /
+  `m9-openocd` / `m9-flash-probe`.
+- **Phase 4 — ACCESSCTRL + DMA + GPIO_NSMASK lockdown.** TRNG,
+  SHA-256, OTP, POWMAN, WATCHDOG, CLOCKS, XOSC, ROSC, PLL_SYS,
+  PLL_USB, SPI1 all narrowed to Secure-only. GPIO_NSMASK bits 8..13
+  cleared from NS (e-paper pins). DMA channel 0 LOCK'd as
+  Secure-only via SECCFG_CH0. NS-side adaptations: skip
+  `runtime_init_clocks`, route `LWIP_RAND` through `s_random`,
+  override `pico_sha256_lock` to a software no-op (bootlock at
+  0x400E080C is Secure-only).
+- **Phase 5 — USB/lwIP audit + transitional cleanup.** Confirmed
+  TinyUSB DPRAM + endpoint FIFOs + lwIP pbuf pools all live in NS
+  RAM (0x20020000..0x20081FFF). The Phase 2 `s_sign_privval` veneer
+  (which would have been a generic signing oracle without HWM
+  enforcement) was retired and the matching REPL command gated off
+  under TZ — privval canonical sign-bytes now must use
+  `s_sign_and_advance` directly.
+- **Phase 6 — End-to-end revalidation + negative test.** Build-flag
+  `PICOWALLET_M9_NEGATIVE_TEST` adds an NS load of
+  0x10000000 at boot; expected behavior is `SecureFault.AUVIOL` ->
+  Secure HardFault handler loops. Verified on hardware: `SFSR=0x48`
+  (AUVIOL + LSERR), `SFAR=0x10000000`, `HFSR=0x40000000` (FORCED).
+  Boundary holds.
 
-- **Phase 1 — Secure-owned bring-up + minimal NS runtime.**
-  pico-sdk 2.2.0 is built around a single-image, mostly-Secure runtime
-  model. The first hardware bring-up attempt revealed that running the
-  SDK's NS-side `runtime_init` from NS state faults on multiple fronts
-  — bootrom function lookups for Secure-only APIs return 0 and crash
-  the NS image on `bx 0`, `early_resets` spin loops never terminate
-  because `RESETS_DONE` is bootrom-gated, `per_core_enable_coprocessors`
-  faults because `NSACR` resets to "no coprocessor access for NS",
-  and `pico_unique_id`'s `__attribute__((constructor))` calls
-  `GET_SYS_INFO` which the bootrom rejects for NS callers in unclear
-  conditions. Each of these is a separate fix in pico-sdk itself.
 
-  Rather than paper over every SDK assumption from NS, **the Secure
-  stub owns every interaction with hardware and the bootrom**. NS is
-  reduced to a hand-rolled minimal C runtime that does not call
-  `runtime_init` and runs no `.init_array` entry that depends on
-  bootrom state.
+#### M9.4 — Quirks learned in flight (kept here for future pico-sdk upgrades)
 
-  - **Phase 1a — Memory layout + linker scripts.** *(landed.)*
-    `firmware/m9/layout.h` + `memmap_secure.ld` + `memmap_nonsecure.ld`.
-    Secure at `0x10000000`, NSC veneer page at `0x1007F000`, NS at
-    `0x10080000`, chains config + HWM at the top of flash. SRAM split
-    by half: Secure `0x20000000–0x2001FFFF`, NS `0x20020000–0x20081FFF`
-    (includes scratch_x/y).
-  - **Phase 1b — Secure stub: SAU + ACCESSCTRL + BXNS.** *(landed.)*
-    SAU regions R0–R4: NSC veneer, NS flash, NS SRAM, NS peripherals,
-    boot ROM. ACCESSCTRL fully open to NS in Phase 1 (locked down in
-    Phase 4). LED diagnostic blink pattern; defensive drop to BOOTSEL
-    if the NS slot's vector table is empty or corrupted.
-  - **Phase 1c — Secure-side hardware bring-up.** *(landed.)*
-    The Secure stub calls, in order, before BXNS:
-    1. `rom_bootrom_state_reset(GLOBAL_STATE | CURRENT_CORE)`
-    2. `runtime_init_early_resets()`
-    3. `runtime_init_usb_power_down()`
-    4. `runtime_init_clocks()`
-    5. `runtime_init_post_clock_resets()`
-    6. `runtime_init_boot_locks_reset()`
-    7. `runtime_init_spin_locks_reset()`
-    8. `rom_set_ns_api_permission(...)` for each of the 8 NS-callable
-       bootrom APIs (re-granted because `bootrom_state_reset` clears
-       them).
+- **`bench.c`** still uses Monocypher's Ed25519 directly with a local
+  test seed (its NS copy). Doesn't touch the real keystore; left
+  intact.
+- **pico-sdk runtime_init is essentially Secure-only.**
+  `bootrom_reset`, `per_core_bootrom_reset`,
+  `bootrom_locking_enable`, `early_resets`, `usb_power_down`,
+  `clocks`, `post_clock_resets`, `boot_locks_reset`,
+  `spin_locks_reset`, `per_core_enable_coprocessors` all run from
+  Secure context; NS suppresses them via `PICO_RUNTIME_SKIP_INIT_*`.
+  Any pico-sdk upgrade needs a re-audit for new bootrom-touching
+  initializers.
+- **Bootrom NS API surface is 8 functions.** `get_sys_info`,
+  `checked_flash_op`, `flash_runtime_to_storage_addr`,
+  `get_partition_table_info`, `secure_call`, `otp_access`, `reboot`,
+  `get_b_partition`. Anything else NS-side lookups returns 0 → bx 0
+  → fault. `rom_bootrom_state_reset(GLOBAL_STATE)` clears the
+  permission bitmap, so the Secure stub re-grants the 8 NS API bits
+  after the reset, before BXNS.
+- **`__attribute__((constructor))` in SDK modules.** `pico_unique_id`'s
+  constructor calls `GET_SYS_INFO` which faults from NS; sidestepped by
+  emptying `__init_array` in the NS linker script.
+- **`gpioc` coprocessor reads from NS are stale on RP2350.** Forced
+  fallback to MMIO SIO reads via `PICO_USE_GPIO_COPROCESSOR=0` on the
+  NS target. Secure uses the coprocessor without issue.
+- **Boot SecureFault recovery escape hatch.** Secure stub bounces to
+  `reset_usb_boot(0,0)` if the NS slot's MSP / reset handler are
+  unset, so a bad NS flash doesn't require BOOTSEL hold to recover.
+- **Console render veneer cost.** Each `s_console_render_*` is a
+  cross-world transition + a multi-hundred-ms SPI write. Rendering is
+  already lazy (≥10s gap in PrivVal mode); the overhead is irrelevant
+  in practice.
 
-    The corresponding NS-side `PICO_RUNTIME_SKIP_INIT_*` defines are
-    set in `firmware/CMakeLists.txt` so the SDK's runtime_init table
-    is mostly empty by the time NS runs.
-  - **Phase 1d — Strip NS-side bring-up to what actually works.**
-    *(landed.)* Two changes turned out to be enough; we did **not**
-    need to vendor pico-sdk's crt0:
-      - `firmware/m9/memmap_nonsecure.ld` makes `__init_array_end =
-        __init_array_start`. pico-sdk's `newlib_interface.c`
-        `runtime_init` still iterates that range, but with the range
-        empty the offending `_retrieve_unique_id_on_boot` constructor
-        (which lives in `.init_array.01000`) is never reached.
-        Side effect: `frame_dummy` (libgcc unwind registration) is
-        also dropped, which is fine — picowallet uses no C++ exceptions.
-      - `m9_open_coprocessors_for_ns()` in the Secure stub sets
-        `NSACR` bits + `CPACR_NS` so NS can issue coprocessor
-        instructions. RP2350's `gpio_set_dir` / `gpio_put` go through
-        the `gpioc` coprocessor (CP0), and libgcc's redundancy-checked
-        branches use CP4/CP7; without this NS faults on the very first
-        `gpio_init`.
+### ✓ M9.5 — PIN unlock + at-rest encryption
 
-    NS now reaches `main()`, runs the splash, enters
-    `mode_select_prompt()`, and idles in `input_wait_press` waiting
-    for a button. Validated on the Pi Debug Probe with `make m9-attach`.
+The M9 boundary covers runtime exploitation of NS code. M9.5 covers
+the **physical-extraction** column: master seed + per-slot overrides
+are AEAD-sealed on flash, unsealable only with the operator's PIN.
 
-  - **Phase 1e — Smoke test + recovery escape hatch.** *(landed.)*
-    Boot on hardware verified end-to-end: bootrom → Secure stub
-    (SAU + ACCESSCTRL + bootrom-state-reset + hardware bring-up +
-    NSACR/CPACR_NS + LED blink × 5 + BXNS) → NS reset handler →
-    `main()` → splash → mode-select. The BOOTSEL recovery path
-    (Secure stub bounces to `reset_usb_boot(0,0)` on bad NS slot)
-    remains in place. LED diagnostic table documented in
-    `firmware/m9/README.md`.
+Shipped in six sub-phases (commits `a1f8117` … `ac53df3`):
 
-- **Phase 2 — NSC veneer entries.** Write the functions in §M9.2 as
-  `cmse_nonsecure_entry` symbols in the Secure image. Validate every
-  NS-supplied pointer on entry with `cmse_check_pointed_object`.
-  Refuse if any output buffer overlaps Secure memory. Start with
-  `s_get_chip_id` + `s_random` (the two things NS needs immediately),
-  then `s_console_render_lines` + `s_input_pressed` once Phase 1d's
-  smoke test is green and we want a real splash + mode-select.
-- **Phase 3 — Build system polish.** *(mostly landed in Phase 1a–1c.)*
-  Two-ELF build, `merge_uf2.py` packaging, debug-probe flashing path,
-  Makefile targets for `m9-build` / `m9-attach` / `m9-flash-probe`.
-- **Phase 4 — ACCESSCTRL + DMA + NSACR lock-down.** Per the boundary
-  table: flash, display SPI, button GPIO, TRNG, SHA peripheral all
-  Secure; USB + remaining peripherals NS. DMA channels attributed
-  per-master so an NS-initiated DMA cannot read Secure memory. Narrow
-  the NS API permission bitmap to the actual set the NS image calls
-  through (likely just `reboot` + maybe `otp_access` for chip-ID).
-- **Phase 5 — TinyUSB + lwIP audit.** Confirm DMA descriptors / pbuf
-  pools / network buffers live entirely in NS memory. Refactor any
-  shared-memory assumptions. Re-enable NS subsystems one at a time
-  on top of the Phase-1 crt0.
-- **Phase 6 — End-to-end revalidation.** `make test` + both testnet
-  scripts pass. Add a negative test: NS deliberately dereferencing the
-  seed VA hard-faults instead of returning bytes.
+#### M9.5.1 — Crypto primitives + sealed-blob format
 
-#### M9.4 — Risks / open questions
+- **Argon2id** KDF (Monocypher), 64 KiB workspace, 3 passes,
+  1 lane. Workspace is a Secure-BSS static (`s_argon2_work`,
+  ~74 KB total Secure BSS after Phase 7) — Secure SRAM is
+  128 KB so we're comfortable.
+- **XChaCha20-Poly1305** AEAD. Salt 16 B, nonce 24 B, tag 16 B,
+  ciphertext up to 64 B → 120 B per sealed-seed blob (88 B for
+  the 32-byte raw-key variant).
+- New `SEED_FLASH` region (one 4 KB sector at the QSPI tail just
+  below `CHAINS`).
+- `m9_seal_payload` / `m9_unseal_payload` are the generic
+  primitives; `m9_seal_seed` / `m9_unseal_seed` are 64-byte
+  wrappers.
+- Smoke test: `s_seal_selftest` veneer round-trips a TRNG payload
+  + verifies wrong-PIN rejection. Hardware-verified.
 
-- **`bench.c`** uses Monocypher's Ed25519 directly with a local test
-  seed; it ends up in NS using the NS copy of Monocypher. No change
-  needed (it never touched the real keystore).
-- **pico-sdk runtime_init is essentially Secure-only.** Found during
-  Phase 1c bring-up. Several initializers — `bootrom_reset`,
-  `per_core_bootrom_reset`, `bootrom_locking_enable`, `early_resets`,
-  `usb_power_down`, `clocks`, `post_clock_resets`, `boot_locks_reset`,
-  `spin_locks_reset`, `per_core_enable_coprocessors` — must run from
-  Secure state. Phase 1c moves all of these into the Secure stub and
-  uses `PICO_RUNTIME_SKIP_INIT_*` to suppress the NS-side
-  registrations. Any future pico-sdk upgrade has to be re-audited
-  for new bootrom-touching initializers.
-- **Bootrom NS API surface is narrow.** Only 8 bootrom APIs are
-  exposed to NS: `get_sys_info`, `checked_flash_op`,
-  `flash_runtime_to_storage_addr`, `get_partition_table_info`,
-  `secure_call`, `otp_access`, `reboot`, `get_b_partition`. Any other
-  ROM function looked up from NS returns 0 and the SDK then does
-  `bx 0` and faults. Also: `rom_bootrom_state_reset(GLOBAL_STATE)`
-  clears the NS permission bitmap; the Secure stub re-grants whatever
-  NS needs before BXNS.
-- **`__attribute__((constructor))` in SDK modules is dangerous from
-  NS.** `pico_unique_id`'s `_retrieve_unique_id_on_boot` constructor
-  calls bootrom `GET_SYS_INFO` which faults even with NS permission
-  granted (the bootrom's NS variant of `get_sys_info` has additional
-  buffer-attribution checks we haven't fully chased). Phase 1d
-  excludes or stubs out the offending module rather than calling the
-  pico-sdk runtime path that registers it.
-- **NSACR resets with NS coprocessor access disabled.** If Phase 2+
-  decides NS needs FPU (Cortex-M33 has it), the Secure stub must set
-  `SCB->NSACR` bits 10 + 11 before BXNS, and the NS crt0 (or first
-  initializer) must set `CPACR_NS`.
-- **TRNG access from NS.** SC handshake needs ephemerals. Options:
-  (a) `s_random` veneer — every random byte is a cross-world call;
-  acceptable since handshakes are infrequent;
-  (b) Secure seeds an NS-side PRNG at boot, NS uses it for bulk
-  randomness — faster but expands NS trust slightly.
-  Default to (a).
-- **Memory cost.** ~5-10 KB of duplicated Monocypher in NS; trivial.
-- **Build complexity.** Two ELFs, dual link, UF2 packaging. Manual.
-- **First-time bringup risk.** SAU misconfiguration = brick.
-  Development build preserves an "escape hatch": the Secure stub's
-  NS-image validation step drops to BOOTSEL via `reset_usb_boot(0,0)`
-  if the NS vector table looks empty or corrupted, so a bad NS flash
-  doesn't require holding BOOTSEL to recover.
-- **Mode select at boot.** Currently NS-driven. After M9 it moves to
-  Secure (Secure decides whether to launch the admin REPL path or the
-  PrivVal path before transferring control), since the choice gates
-  trust.
-- **Console rendering veneer cost.** Each `s_console_render_lines`
-  call is a context switch. Rendering is already lazy (≥10 s gap in
-  PrivVal mode), so the overhead is irrelevant in practice. The
-  console is also size-limited; the veneer caps lines × line length.
+#### M9.5.2 — PIN entry + lock state machine
 
-### ◯ M9.5 — At-rest encryption + PIN unlock
+- 4-8 digit numeric PIN, entered on the device via the LEFT/RIGHT
+  buttons (LEFT scrolls down, RIGHT scrolls up, BOTH commits the
+  current selection; the wheel cycles 0..9 + DONE).
+- PIN is collected entirely in Secure context; NS never sees the
+  bytes.
+- Attempt counter is a thermometer over 10 counter pages inside
+  the `SEED_FLASH` sector. Incremented BEFORE the Argon2id
+  attempt (so power-cycling can't reset the count); reset on
+  successful unlock by erasing + re-programming the sector.
+  10 consecutive failures triggers a full factory wipe of
+  `SEED + SLOT_SEEDS + CHAINS + HWM` and the PIN-/seed-caches.
+- Veneers: `s_pin_setup` (no args; Secure-driven UI runs the
+  set+confirm flow), `s_pin_unlock` (no args; Secure UI prompts
+  + Argon2id + unseal), `s_pin_is_initialized`, `s_pin_attempts`.
+- e-paper partial-LUT refresh (`display_render_fast`, ~300 ms vs
+  the full LUT's ~1 s) makes each digit scroll snappy. The first
+  render of every PIN entry session is forced-full to re-baseline
+  the panel.
+- Boot integration in `main.c`: after splash, loop on
+  `s_pin_setup` (first boot) or `s_pin_unlock` (subsequent boots)
+  until `M9_PIN_OK` or `M9_PIN_ERR_WIPED` (the wipe path falls
+  back to setup on the same boot).
 
-Builds on the M9 boundary: with the seed now in Secure memory, the
-remaining attack surface is **physical**. Today's `TEST_SEED` is
-plaintext in firmware; anyone with the flash dump tools (~$50 of gear)
-can extract it. M9.5 encrypts the seed at rest and gates decryption
-on a PIN entered through M9's trusted-prompt UI.
+#### M9.5.3 — BIP-39 mnemonic generate + display
 
-Sketch:
-- Seed-encryption key (SEK) = HKDF(`pico_unique_board_id || PIN || salt`)
-- At boot, Secure prompts for PIN via the trusted UI, derives SEK,
-  decrypts the seed blob from flash, holds the seed in Secure SRAM.
-- Power off → seed gone from SRAM → device requires PIN again next
-  boot.
-- Wrong-PIN counter in Secure-write flash; N consecutive failures
-  triggers a destructive wipe (HWM + chain config + encrypted seed
-  blob all erased).
-- PIN entry UI: two-button digit dial (LEFT scrolls, RIGHT confirms
-  digit; both confirms PIN). 4-6 digits.
+- Official BIP-39 English wordlist (2048 entries, ~18 KB Secure
+  rodata) shipped as `firmware/src/os/crypto/bip39_wordlist.c`.
+- `bip39_generate` produces a 24-word mnemonic from 32 B of TRNG
+  entropy with the 8-bit checksum (`SHA-256(entropy)[0]`).
+- `bip39_to_seed` is PBKDF2-HMAC-SHA512(2048 iters) over the
+  mnemonic phrase with salt `"mnemonic"` (no BIP-39 passphrase
+  support yet).
+- `pin_ui_show_mnemonic` walks the operator through 4 pages of
+  6 words each. Pages 1–3 advance on RIGHT; page 4 requires
+  BOTH-press to confirm the operator wrote it down. Each page
+  uses a full-LUT render so the words are read cleanly.
+- Setup flow inside `s_pin_setup`: PIN-set+confirm → operator
+  picks generate-or-restore → generate runs `bip39_generate` +
+  `pin_ui_show_mnemonic` + `bip39_to_seed` + seal.
 
-Logical successor to M9, deliberately separated because the PIN UX
-+ retry policy + provisioning ("how does the operator set the PIN
-the first time?") is its own design exercise on top of the M9
-trusted-prompt foundation.
+#### M9.5.4 — Button-driven mnemonic restore
+
+- `pin_ui_restore_mnemonic` collects 24 words via a prefix-narrow
+  letter wheel.
+- **Dynamic wheel**: only letters that actually extend the typed
+  prefix into a real BIP-39 word appear in the wheel, computed
+  per-prefix from the sorted wordlist. Typical wheel size 2-7
+  letters instead of the static 28 (a-z + del + pick). Plus "del"
+  + "pick" slots when the prefix is non-empty.
+- When the typed prefix uniquely identifies a word (count == 1),
+  the device auto-advances; otherwise the operator hits "pick" to
+  enter candidate-scroll mode.
+- BIP-39 checksum is verified after the 24th word; on mismatch the
+  device shows "Bad mnemonic - retry" and loops back to word 1.
+
+#### M9.5.5 — Per-chain-slot seed override
+
+Each of the 16 HWM slots can opt out of master-derived signing by
+carrying its own sealed seed material, supporting two override
+flavors:
+
+- **MNEMONIC**: 64-byte BIP-39 seed (same generate-or-restore
+  flow as master setup). Signs via SLIP-10 over the slot's seed.
+- **RAW_KEY**: 32-byte Ed25519 priv-key seed imported from the
+  operator's existing `priv_validator_key.json` (REPL-typed hex
+  over CDC; for migration scenarios where the validator can't
+  regenerate keys without losing delegated stake). Signs the
+  key directly with no SLIP-10 derivation.
+
+Storage: new `SLOT_SEEDS_FLASH` region (16 × 4 KB sectors, one
+per slot, 64 KB total). `m9_slot_seed_source(slot_idx)` returns
+`DERIVED` / `MNEMONIC` / `RAW_KEY` based on the slot sector's
+header. Sign-path dispatch in `s_sign_and_advance` branches on
+the source after the HWM check.
+
+PIN is cached Secure-side (`m9_pin_cache_*` in `seed_flash.c`)
+after a successful unlock so per-slot unseals don't re-prompt.
+Cache is cleared on factory wipe.
+
+REPL commands: `os.slot_list`, `os.slot_source <0..15>`,
+`os.slot_mnemonic <0..15>`, `os.slot_import <0..15> <64-hex>`,
+`os.slot_clear <0..15>`.
+
+#### M9.5.6 — TEST_SEED retirement
+
+`TEST_SEED` is gone. `s_master_seed[64]` (Secure BSS) is
+populated by `m9_master_seed_set` after a successful PIN
+setup / unlock; `m9_factory_wipe_all` clears it. The DERIVED
+signing path fails closed (`KEYSTORE_ERR_BAD_PATH`) if the
+seed isn't loaded.
+
+#### M9.5.7 — Optional OTP-binding (gated `PICOWALLET_M9_OTP_BIND`)
+
+`firmware/m9/m9_otp.c` reads / one-time-burns a 32-byte
+device secret to OTP row 2048. When the cmake option is ON, the
+Argon2id input becomes `OTP_SECRET || PIN` instead of just
+`PIN`, so flash-dump-alone attacks cannot brute-force the PIN
+offline without ALSO extracting the OTP secret from the chip.
+Default is OFF — flipping it ON is a permanent burn per device.
+
+#### M9.5.8 — Factory reset gesture
+
+5-second both-button hold (existing trigger) followed by a
+3-second "WIPE in 3 / 2 / 1" countdown. Releasing either button
+during the countdown cancels. Past the countdown:
+`m9_factory_wipe_all` clears SEED + SLOT_SEEDS + CHAINS + HWM +
+PIN cache + master-seed cache, then `watchdog_reboot(0, 0, 0)`
+so the next boot lands on a fresh first-boot setup. The
+pre-7.5 confirm screen (`os_display_confirm` + ACCEPT/DENY) was
+removed under TZ because the 5-second hold IS the consent
+gesture; a second screen on top of it created input-handoff
+races.
 
 ### ◯ M10 — Signed firmware + OTP fuse
 
@@ -655,11 +716,15 @@ development.
 
 | | Subject | Notes |
 |---|---|---|
-| | PIN unlock + key-at-rest encryption | Currently the keystore is at-rest in flash with no PIN gate |
-| | Multi-validator key selection | Hardcoded `m/0'` path; real product needs named keys + selection UX |
-| | Console paging / longer history | Console buffer is small; long logs lose old lines |
-| ✓ | Operational metrics over TMKMS REPL | `os.hwm.list` shows per-slot HWM + sign count; `os.metrics` shows uptime, active slot count, total signs across all slots. "Last error" / structured error counters still TODO. |
-| ✓ | Factory reset UX | Hold both buttons for 5 s in TMKMS mode (or `os.factory_reset` REPL command) → confirm screen → chain config + HWM wiped. Validator key not touched. |
+| ✓ | PIN unlock + key-at-rest encryption | M9.5 shipped: Argon2id-derived KEK + XChaCha20-Poly1305 AEAD over a BIP-39-derived master seed; PIN attempt counter; per-slot seed overrides. |
+| ✓ | Operational metrics over TMKMS REPL | `os.hwm.list`, `os.metrics`, `os.slot_list`, `os.pin_status`. Structured error counters still TODO. |
+| ✓ | Factory reset UX | 5 s both-button hold + 3 s countdown → wipes SEED + SLOT_SEEDS + CHAINS + HWM + caches → watchdog_reboot into fresh setup. |
+| | Per-chain BIP-44 derivation path | DERIVED slots share `m/0'`; would need per-slot `path` field in `chain_slot_t` + UI for the operator to set it. Per-slot MNEMONIC override gives chain-isolation without this, but BIP-44 hygiene still wants distinct paths. |
+| | Multi-validator key selection UX | Named keys + on-device picker. The s_get_pubkey veneer takes any SLIP-10 path; there's no UI for selecting between them at sign time. |
+| | Console paging / longer history | 12-line buffer; long logs lose old lines. |
+| | Structured error counters | "Last error" + per-class counters reachable from `os.metrics`. |
+| | Idle relock | PIN cache + master-seed cache currently persist until reboot or factory wipe. Auto-clear after N minutes of inactivity would shrink the post-unlock window. |
+| | Flip `PICOWALLET_M9_OTP_BIND` ON | One-time-permanent OTP burn per device; should happen as part of the production-provisioning workflow alongside M10. |
 
 ---
 
@@ -671,21 +736,39 @@ picowallet/
 ├── README.md                build + flash instructions
 ├── splash.png               source artwork for splash_image.h
 ├── firmware/
-│   ├── CMakeLists.txt
+│   ├── CMakeLists.txt             NS image + PICOWALLET_TRUSTZONE option
 │   ├── pico_sdk_import.cmake
+│   ├── m9/                         M9 TrustZone-M Secure image
+│   │   ├── CMakeLists.txt
+│   │   ├── layout.h                memory map (SAU regions, NSC, SRAM split)
+│   │   ├── memmap_secure.ld        Secure linker script (0x10000000)
+│   │   ├── memmap_nonsecure.ld     NS linker script   (0x10080000)
+│   │   ├── secure_stub.c           Boot: SAU + ACCESSCTRL + runtime_init + BXNS
+│   │   ├── veneers.c               cmse_nonsecure_entry bodies (all s_* fns)
+│   │   ├── trng.h / trng.c         Secure-only TRNG word/byte reader
+│   │   ├── m9_otp.{h,c}            Per-device OTP secret (gated)
+│   │   ├── merge_uf2.py            Combine S + NS UF2s into picowallet_m9.uf2
+│   │   └── README.md               LED diagnostic + flashing notes
 │   └── src/
 │       ├── os/
 │       │   ├── main.c                  boot flow + mode dispatch
-│       │   ├── api.{h,c}               secure-gateway-style API for apps
+│       │   ├── secure_api.h            NS-side s_* veneer declarations
+│       │   ├── api.{h,c}
 │       │   ├── app_registry.{h,c}
 │       │   ├── mode.{h,c}              TMKMS / PrivVal enum
 │       │   ├── bench.{h,c}             on-device microbenchmarks
 │       │   ├── crypto/
-│       │   │   ├── monocypher{,-ed25519}.{h,c}   X25519 / Ed25519 / AEAD
-│       │   │   ├── sha256.{h,c}                  HW-accel SHA, HMAC, HKDF
-│       │   │   └── keystore.{h,c}                SLIP-10 derivation
+│       │   │   ├── monocypher{,-ed25519}.{h,c}   X25519 / Ed25519 / AEAD / Argon2
+│       │   │   ├── sha256.{h,c}                  HW-accel SHA, HMAC, HKDF (Secure)
+│       │   │   ├── keccak.{h,c}                  Keccak-f1600 (NS)
+│       │   │   ├── strobe.{h,c}                  STROBE-128 (NS, Merlin)
+│       │   │   ├── merlin.{h,c}                  Labeled transcripts (NS)
+│       │   │   ├── keystore.{h,c}                SLIP-10 + master-seed cache
+│       │   │   └── bip39.{h,c} + bip39_wordlist.{h,c}   BIP-39 (Secure)
 │       │   ├── storage/
 │       │   │   ├── flash_layout.h                single source for offsets
+│       │   │   ├── seed_flash.{h,c}              Argon2id seal + master seed + PIN counter
+│       │   │   ├── slot_seed.{h,c}               per-slot seed override sectors
 │       │   │   ├── hwm_flash.{h,c}               per-chain HWM
 │       │   │   └── chains.{h,c}                  per-chain config table
 │       │   ├── transport/
@@ -696,7 +779,8 @@ picowallet/
 │       │   │   ├── tusb_config.h
 │       │   │   └── lwipopts.h
 │       │   ├── hal/                              display, input, usb_console
-│       │   └── ui/                               console, splash, mode_select, confirm
+│       │   └── ui/                               splash, console, mode_select,
+│       │                                         confirm, factory_reset, pin_ui
 │       └── apps/
 │           ├── cosmos/
 │           │   ├── app.{h,c}
