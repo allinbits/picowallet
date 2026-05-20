@@ -204,6 +204,7 @@ static int advance(gno_chain_t *c) {
                     sign_bytes, sign_len, &type, &height, &round,
                     &chain_id, &chain_id_len) != 0) {
                 os_console_log("gno-sc: bad canonical sign bytes");
+                s_errors_log(M9_ERR_CAT_PARSER, "gno: bad canonical sign bytes");
                 resp_len = gno_privval_encode_sign_response_error(
                     "bad_sign_bytes", resp_plain, sizeof(resp_plain));
                 if (!resp_len) return -1;
@@ -226,6 +227,7 @@ static int advance(gno_chain_t *c) {
                          "gno-sc[%s]: chain_id_mismatch got=%.*s",
                          c->slot->label, cid_show, chain_id);
                 os_console_log(m);
+                s_errors_log(M9_ERR_CAT_CHAIN_ID_MISMATCH, m);
                 resp_len = gno_privval_encode_sign_response_error(
                     "chain_id_mismatch", resp_plain, sizeof(resp_plain));
                 if (!resp_len) return -1;

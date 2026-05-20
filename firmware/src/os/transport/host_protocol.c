@@ -119,6 +119,8 @@ void host_protocol_print_help(void) {
     usb_cdc_printf("  seal_selftest <pin>                    M9.5 seal/unseal smoke test (4-16 chars)\r\n");
     usb_cdc_printf("  pin_status                             initialized + failed-attempt count\r\n");
     usb_cdc_printf("  slot_list                              dump all 16 slots (family/label/chain_id/source)\r\n");
+    usb_cdc_printf("  errors                                 per-category counters + last error message\r\n");
+    usb_cdc_printf("  errors_reset                           zero the counters (keeps boot_seq)\r\n");
     usb_cdc_printf("  slot_source <0..15>                    slot's seed source (DERIVED/MNEMONIC/RAW_KEY)\r\n");
     usb_cdc_printf("  slot_mnemonic <0..15>                  set slot mnemonic via on-device UI\r\n");
     usb_cdc_printf("  slot_import <0..15> <64-hex>           import 32B Ed25519 priv-key for slot\r\n");
@@ -567,6 +569,36 @@ static int dispatch_os(const char *cmd, const char *args,
         if (rc == 0) snprintf(reply, reply_size, "ok: slot %d -> DERIVED", slot_idx);
         else         snprintf(reply, reply_size, "FAIL rc=%d", rc);
         return rc == 0 ? 0 : -1;
+    }
+    if (strcmp(cmd, "errors") == 0) {
+        m9_error_state_t st;
+        s_errors_get(&st);
+        static const char *const NAMES[] = {
+            "hwm_reject", "slot_not_configured", "slot_unseal",
+            "pin_bad", "pin_wiped", "seal_fail",
+            "sc_handshake", "chain_id_mismatch", "parser",
+            "tcp", "internal",
+        };
+        usb_cdc_printf("boot_seq: %u   total: %u\r\n",
+                       (unsigned)st.boot_seq, (unsigned)st.total);
+        for (size_t i = 0; i < M9_ERR_CAT_COUNT; i++) {
+            if (st.counters[i] != 0) {
+                usb_cdc_printf("  %-22s %u\r\n", NAMES[i],
+                               (unsigned)st.counters[i]);
+            }
+        }
+        if (st.last_msg[0] != '\0') {
+            usb_cdc_printf("last: [%s] %.*s\r\n",
+                           (st.last_cat < M9_ERR_CAT_COUNT ? NAMES[st.last_cat] : "?"),
+                           (int)M9_ERROR_MSG_MAX, st.last_msg);
+        }
+        snprintf(reply, reply_size, "ok");
+        return 0;
+    }
+    if (strcmp(cmd, "errors_reset") == 0) {
+        s_errors_reset();
+        snprintf(reply, reply_size, "ok: errors cleared");
+        return 0;
     }
     if (strcmp(cmd, "slot_list") == 0) {
         // One-shot dump of all 16 HWM slots with family / label /

@@ -613,6 +613,7 @@ static void handle_sign_vote(privval_state_t *st, privval_sink_t *sink,
                  "cosmos-sc[%s]: chain_id_mismatch got=%.32s want=%.32s",
                  st->slot_label, r.chain_id, st->expected_chain_id);
         os_console_log(log);
+        s_errors_log(M9_ERR_CAT_CHAIN_ID_MISMATCH, log);
         send_error_in(sink, 4, 2, "chain_id_mismatch");
         return;
     }
@@ -716,6 +717,7 @@ static void handle_sign_proposal(privval_state_t *st, privval_sink_t *sink,
                  "cosmos-sc[%s]: chain_id_mismatch got=%.32s want=%.32s",
                  st->slot_label, r.chain_id, st->expected_chain_id);
         os_console_log(log);
+        s_errors_log(M9_ERR_CAT_CHAIN_ID_MISMATCH, log);
         send_error_in(sink, 6, 2, "chain_id_mismatch");
         return;
     }

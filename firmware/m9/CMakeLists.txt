@@ -16,6 +16,8 @@ add_executable(picowallet_secure
     trng.c
     # Phase 7.5: per-device OTP secret mixed into the Argon2id KEK input.
     m9_otp.c
+    # Structured error counters (os.errors REPL).
+    m9_errors.c
     # Phase 7.1: PIN-sealed master-seed primitives (Argon2id + AEAD).
     ../src/os/storage/seed_flash.c
     # Phase 7.5: per-chain-slot seed override storage.

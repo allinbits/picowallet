@@ -276,3 +276,45 @@ int s_slot_clear_override(uint8_t slot_idx);
 //   -101  invalid NS pointer (cmse range check failed)
 //   -102  PIN length out of range
 int s_seal_selftest(const uint8_t *pin, size_t pin_len);
+
+// --- Structured error telemetry -----------------------------------------
+//
+// All firmware error sites (Secure + NS) route through the single Secure
+// counter table below. NS apps call s_errors_log to record a failure;
+// the REPL command os.errors fetches the snapshot via s_errors_get.
+
+typedef enum {
+    M9_ERR_CAT_HWM_REJECT        = 0,
+    M9_ERR_CAT_SLOT_NOT_CONFIG   = 1,
+    M9_ERR_CAT_SLOT_UNSEAL       = 2,
+    M9_ERR_CAT_PIN_BAD           = 3,
+    M9_ERR_CAT_PIN_WIPED         = 4,
+    M9_ERR_CAT_SEAL_FAIL         = 5,
+    M9_ERR_CAT_SC_HANDSHAKE      = 6,
+    M9_ERR_CAT_CHAIN_ID_MISMATCH = 7,
+    M9_ERR_CAT_PARSER            = 8,
+    M9_ERR_CAT_TCP               = 9,
+    M9_ERR_CAT_INTERNAL          = 10,
+    M9_ERR_CAT_COUNT
+} m9_err_cat_t;
+
+#define M9_ERROR_MSG_MAX 64u
+
+typedef struct {
+    uint32_t counters[M9_ERR_CAT_COUNT];
+    uint32_t total;
+    uint32_t boot_seq;
+    char     last_msg[M9_ERROR_MSG_MAX];
+    uint8_t  last_cat;
+} m9_error_state_t;
+
+// Record an error from NS. `msg` is a NUL-terminated string (or NULL);
+// truncated to fit. Validates the buffer; the message itself is just
+// diagnostic, not secret.
+void s_errors_log(uint8_t category, const char *msg);
+
+// Copy the current error state into NS memory.
+void s_errors_get(m9_error_state_t *out);
+
+// Reset all counters (keeps boot_seq advancing).
+void s_errors_reset(void);

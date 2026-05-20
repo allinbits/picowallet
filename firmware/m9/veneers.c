@@ -49,6 +49,7 @@
 #include "os/storage/seed_flash.h"
 #include "os/storage/slot_seed.h"
 #include "os/ui/pin_ui.h"
+#include "m9_errors.h"
 
 // Phase 2c: signing veneers reach into Secure-side keystore.c which has
 // the seed + SLIP-10 + Ed25519 + SHA-512 (all compiled only into the
@@ -230,7 +231,10 @@ int s_sign_and_advance(const s_sign_and_advance_args_t *args) {
     size_t          slot  = (v.hwm_slot_idx < 8u) ? v.hwm_slot_idx
                                                   : (size_t)(v.hwm_slot_idx - 8u);
     const chain_slot_t *cs = chains_get(fam, slot);
-    if (!cs || !cs->in_use) return -2;
+    if (!cs || !cs->in_use) {
+        m9_error_log(M9_ERR_CAT_SLOT_NOT_CONFIG, "sign on unconfigured slot");
+        return -2;
+    }
 
     // HWM strict-advance using the slot's chain_id (Secure's truth).
     // chain_id strlen is bounded by CHAINS_CHAIN_ID_MAX, set at config-add.
@@ -238,6 +242,7 @@ int s_sign_and_advance(const s_sign_and_advance_args_t *args) {
     while (cid_len < CHAINS_CHAIN_ID_MAX && cs->chain_id[cid_len] != '\0') cid_len++;
     if (!hwm_advance(v.hwm_slot_idx, cs->chain_id, cid_len,
                      v.type, v.height, v.round)) {
+        m9_error_log(M9_ERR_CAT_HWM_REJECT, "HWM strict-advance rejected");
         return -1;
     }
 
@@ -265,6 +270,7 @@ int s_sign_and_advance(const s_sign_and_advance_args_t *args) {
         // Should not happen: this veneer is callable only after
         // s_pin_unlock OK, which seeded the cache. Bail rather than
         // accidentally falling back to the master key.
+        m9_error_log(M9_ERR_CAT_INTERNAL, "sign before unlock");
         return -3;
     }
     uint8_t slot_buf[64];
@@ -272,6 +278,7 @@ int s_sign_and_advance(const s_sign_and_advance_args_t *args) {
     crypto_wipe(pin, sizeof(pin));
     if (plain_len == 0) {
         crypto_wipe(slot_buf, sizeof(slot_buf));
+        m9_error_log(M9_ERR_CAT_SLOT_UNSEAL, "slot blob unseal failed");
         return -3;
     }
     int sign_rc;
@@ -541,9 +548,11 @@ int s_pin_unlock(void) {
         crypto_wipe(plaintext, sizeof(plaintext));
         if (m9_pin_attempts() >= M9_PIN_MAX_ATTEMPTS) {
             m9_factory_wipe_all();
+            m9_error_log(M9_ERR_CAT_PIN_WIPED, "attempt counter exhausted -> wipe");
             pin_ui_show_status("WIPED");
             return M9_PIN_ERR_WIPED;
         }
+        m9_error_log(M9_ERR_CAT_PIN_BAD, "bad PIN");
         pin_ui_show_status("Bad PIN");
         return M9_PIN_ERR_BAD_PIN;
     }
@@ -635,6 +644,51 @@ int s_slot_clear_override(uint8_t slot_idx) {
     if (slot_idx >= SLOT_SEED_COUNT) return -1;
     m9_slot_seed_clear(slot_idx);
     return 0;
+}
+
+// --- Structured error veneers -------------------------------------------
+
+__attribute__((cmse_nonsecure_entry))
+void s_errors_log(uint8_t category, const char *msg) {
+    if (category >= M9_ERR_CAT_COUNT) return;
+    char local[M9_ERROR_MSG_MAX];
+    local[0] = '\0';
+    if (msg) {
+        // Probe one byte; if reachable, scan a bounded distance for
+        // the NUL. Anything beyond M9_ERROR_MSG_MAX-1 is truncated.
+        const void *chk = cmse_check_address_range(
+            (void *)msg, 1, CMSE_NONSECURE | CMSE_MPU_READ);
+        if (chk) {
+            const char *p = (const char *)chk;
+            size_t i = 0;
+            while (i + 1 < sizeof(local)) {
+                // Range-check each subsequent byte (the caller might
+                // have a partial buffer near the NS boundary).
+                const void *step = cmse_check_address_range(
+                    (void *)(p + i), 1, CMSE_NONSECURE | CMSE_MPU_READ);
+                if (!step) break;
+                char c = p[i];
+                if (c == '\0') break;
+                local[i++] = c;
+            }
+            local[i] = '\0';
+        }
+    }
+    m9_error_log(category, local[0] ? local : NULL);
+}
+
+__attribute__((cmse_nonsecure_entry))
+void s_errors_get(m9_error_state_t *out) {
+    if (!out) return;
+    const void *chk = cmse_check_address_range(
+        out, sizeof(*out), CMSE_NONSECURE | CMSE_MPU_READWRITE);
+    if (!chk) return;
+    m9_error_get((m9_error_state_t *)chk);
+}
+
+__attribute__((cmse_nonsecure_entry))
+void s_errors_reset(void) {
+    m9_error_reset();
 }
 
 __attribute__((cmse_nonsecure_entry))
