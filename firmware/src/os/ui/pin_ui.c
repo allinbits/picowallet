@@ -336,6 +336,7 @@ static uint16_t collect_one_word(int word_num) {
     int  typed_len = 0;
     int  wheel_pos = 0;
 
+    uint16_t result = 0;
     while (1) {
         int cand_start, cand_count;
         find_prefix_range(typed, typed_len, &cand_start, &cand_count);
@@ -347,7 +348,8 @@ static uint16_t collect_one_word(int word_num) {
             snprintf(msg, sizeof(msg), "Word %d: %s",
                      word_num, bip39_wordlist[cand_start]);
             pin_ui_show_status(msg);
-            return (uint16_t)cand_start;
+            result = (uint16_t)cand_start;
+            break;
         }
 
         restore_wheel_t wheel;
@@ -356,7 +358,8 @@ static uint16_t collect_one_word(int word_num) {
         if (wheel_count == 0) {
             // Pathological: no extensions and no del/pick. Shouldn't
             // happen in practice -- bail with the first candidate.
-            return (uint16_t)cand_start;
+            result = (uint16_t)cand_start;
+            break;
         }
         if (wheel_pos >= wheel_count) wheel_pos = 0;
 
@@ -375,8 +378,9 @@ static uint16_t collect_one_word(int word_num) {
                 }
                 wheel_pos = 0;
             } else if (wheel.has_pick && wheel_pos == RW_INDEX_PICK(&wheel)) {
-                return pick_from_candidates(word_num, typed,
-                                            cand_start, cand_count);
+                result = pick_from_candidates(word_num, typed,
+                                              cand_start, cand_count);
+                break;
             } else if (wheel_pos >= 0 && wheel_pos < wheel.n_letters) {
                 if (typed_len < RESTORE_PREFIX_MAX) {
                     typed[typed_len++] = wheel.letters[wheel_pos];
@@ -386,6 +390,10 @@ static uint16_t collect_one_word(int word_num) {
             }
         }
     }
+    // Don't leave the typed prefix bytes on the stack; the entered
+    // mnemonic word is reconstructible from any 4-char prefix.
+    crypto_wipe(typed, sizeof(typed));
+    return result;
 }
 
 int pin_ui_restore_mnemonic(uint16_t out_words[24]) {
@@ -393,6 +401,10 @@ int pin_ui_restore_mnemonic(uint16_t out_words[24]) {
         out_words[i] = collect_one_word(i + 1);
     }
     if (!bip39_check_checksum(out_words)) {
+        // Wipe the partial word indices before returning -- otherwise
+        // a typo'd mnemonic stays in the caller's buffer (the caller
+        // wipes too, but defense-in-depth).
+        crypto_wipe(out_words, sizeof(uint16_t) * 24);
         pin_ui_show_status("Bad mnemonic - retry");
         return -1;
     }

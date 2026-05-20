@@ -1,25 +1,33 @@
-// M9 Phase 1b -- Secure-side bringup stub.
+// M9 Secure-side boot stub.
 //
-// Runs at 0x10000000 after the boot ROM hands off. Does the minimum
-// work needed to expose the Non-Secure world to the rest of the
-// firmware:
+// Runs at 0x10000000 after the boot ROM hands off. Owns every
+// interaction with hardware and the bootrom before transferring to
+// NS:
 //
-//   1. Program the SAU with the regions declared in firmware/m9/layout.h
-//      (one NSC range at the tail of Secure flash, one NS flash range
-//      covering the NS image + chains config + HWM, one NS SRAM range
-//      covering the NS image's RAM + scratch banks).
-//   2. Branch-with-state-switch (BXNS) to the Non-Secure image's reset
-//      handler at M9_NONSECURE_FLASH_BASE.
+//   1. Drive runtime_init (early-resets, USB power-down, clocks,
+//      post-clock-resets, boot/spin locks) from Secure state, since
+//      the bootrom paths NS would otherwise take are Secure-only on
+//      RP2350.
+//   2. Open NS coprocessor access (NSACR + CPACR_NS) for CP0 (gpioc)
+//      + CP4/CP7 (libgcc RCP).
+//   3. Route NVIC IRQs to NS so timers / USB callbacks fire on the
+//      NS side.
+//   4. Re-grant the 8 NS-callable bootrom APIs (the GLOBAL_STATE
+//      reset cleared them).
+//   5. Prime the Secure-side chain config + HWM caches from flash
+//      (the signing veneer reads these on every privval sign).
+//   6. Program the SAU (R0 NSC veneer band, R1 NS flash, R2 NS SRAM,
+//      R3 peripheral space, R4 boot ROM).
+//   7. Apply ACCESSCTRL: open the per-peripheral regs to NS, clear
+//      GPIO_NSMASK bits 8..13 (e-paper pins) from NS, then close
+//      TRNG/SHA-256/SPI1/OTP/POWMAN/WATCHDOG/CLOCKS/XOSC/ROSC/PLLs
+//      back to Secure-only. LOCK DMA channel 0 as Secure-reserved.
+//   8. BXNS to the NS image's reset handler at M9_NONSECURE_FLASH_BASE.
 //
-// ACCESSCTRL peripheral attribution is deferred to Phase 4. Phase 1b
-// only verifies the SAU + BXNS plumbing -- the existing firmware
-// keeps doing what it does today, just from inside Non-Secure state.
-//
-// The seed remains in NS in Phase 1b (it lives in keystore.c's
-// TEST_SEED, compiled into the NS image). Phase 2.x onward migrates
-// keystore, signing, HWM writes, chain config writes, display, and
-// button input into the Secure image and replaces the call sites in
-// firmware/src/ with the veneers declared in os/secure_api.h.
+// Seed material, sign keys, all UI rendering, button polls, and
+// flash mutations live exclusively Secure-side after this stub
+// hands off; NS reaches them only through the veneers declared in
+// firmware/src/os/secure_api.h.
 
 #include <stdint.h>
 

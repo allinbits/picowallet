@@ -141,6 +141,12 @@ static int slip10_ed25519_step(uint8_t node[64], uint32_t index) {
     uint8_t next[64];
     crypto_sha512_hmac(next, node + 32, 32, data, sizeof(data));
     memcpy(node, next, 64);
+    // `data` carries the parent private key in bytes [1..32]; `next`
+    // is the freshly derived child node (also keyed material). Both
+    // must be wiped before return -- memset would be DCE-prunable
+    // because nothing reads these stack locals afterward.
+    crypto_wipe(data, sizeof(data));
+    crypto_wipe(next, sizeof(next));
     return KEYSTORE_OK;
 }
 
@@ -163,7 +169,7 @@ static int derive_ed25519_from_seed(const uint8_t *seed, size_t seed_len,
     for (int i = 0; i < n; i++) {
         int rc = slip10_ed25519_step(node, indices[i]);
         if (rc != KEYSTORE_OK) {
-            memset(node, 0, sizeof(node));
+            crypto_wipe(node, sizeof(node));
             return rc;
         }
     }
@@ -172,8 +178,8 @@ static int derive_ed25519_from_seed(const uint8_t *seed, size_t seed_len,
     memcpy(ed_seed, node, 32);
     crypto_ed25519_key_pair(secret_key, public_key, ed_seed);
 
-    memset(ed_seed, 0, sizeof(ed_seed));
-    memset(node,    0, sizeof(node));
+    crypto_wipe(ed_seed, sizeof(ed_seed));
+    crypto_wipe(node,    sizeof(node));
     return KEYSTORE_OK;
 }
 
@@ -200,12 +206,12 @@ int keystore_sign_with_bip39_seed(const uint8_t bip39_seed[64],
     uint8_t pk[32];
     int rc = derive_ed25519_from_seed(bip39_seed, 64, path, sk, pk);
     if (rc != KEYSTORE_OK) {
-        memset(sk, 0, sizeof(sk));
+        crypto_wipe(sk, sizeof(sk));
         return rc;
     }
     crypto_ed25519_sign(out_sig, sk, data, data_len);
-    memset(sk, 0, sizeof(sk));
-    memset(pk, 0, sizeof(pk));
+    crypto_wipe(sk, sizeof(sk));
+    crypto_wipe(pk, sizeof(pk));
     return KEYSTORE_OK;
 }
 
@@ -217,8 +223,8 @@ int keystore_sign_with_raw_key(const uint8_t raw_seed[32],
     uint8_t pk[32];
     crypto_ed25519_key_pair(sk, pk, raw_seed);
     crypto_ed25519_sign(out_sig, sk, data, data_len);
-    memset(sk, 0, sizeof(sk));
-    memset(pk, 0, sizeof(pk));
+    crypto_wipe(sk, sizeof(sk));
+    crypto_wipe(pk, sizeof(pk));
     return KEYSTORE_OK;
 }
 
@@ -235,7 +241,7 @@ int os_crypto_get_pubkey(os_curve_t curve, const char *path,
 
     uint8_t secret_key[64];
     int rc = derive_ed25519(path, secret_key, out_pubkey);
-    memset(secret_key, 0, sizeof(secret_key));
+    crypto_wipe(secret_key, sizeof(secret_key));
     if (rc != KEYSTORE_OK) return rc;
 
     *out_len = 32;
@@ -252,14 +258,14 @@ int os_crypto_sign(os_curve_t curve, const char *path,
     uint8_t public_key[32];
     int rc = derive_ed25519(path, secret_key, public_key);
     if (rc != KEYSTORE_OK) {
-        memset(secret_key, 0, sizeof(secret_key));
+        crypto_wipe(secret_key, sizeof(secret_key));
         return rc;
     }
 
     crypto_ed25519_sign(out_sig, secret_key, data, data_len);
 
-    memset(secret_key, 0, sizeof(secret_key));
-    memset(public_key, 0, sizeof(public_key));
+    crypto_wipe(secret_key, sizeof(secret_key));
+    crypto_wipe(public_key, sizeof(public_key));
     return KEYSTORE_OK;
 }
 

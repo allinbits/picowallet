@@ -39,6 +39,8 @@ void hkdf_expand(const uint8_t *prk,  size_t prk_len,
 
 #include "pico/sha256.h"
 
+#include "os/crypto/monocypher.h"   // crypto_wipe
+
 #define SHA256_BLOCK_LEN 64
 
 #if PICOWALLET_TRUSTZONE
@@ -65,6 +67,7 @@ static void sha256_oneshot(const uint8_t *data, size_t len, uint8_t out[SHA256_O
     sha256_result_t r;
     pico_sha256_finish(&st, &r);
     memcpy(out, r.bytes, SHA256_OUT_LEN);
+    crypto_wipe(&r, sizeof(r));
 }
 
 void sha256(const uint8_t *data, size_t len, uint8_t out[SHA256_OUT_LEN]) {
@@ -108,6 +111,15 @@ void hmac_sha256(const uint8_t *key,  size_t key_len,
     pico_sha256_finish(&st, &outer);
 
     memcpy(out, outer.bytes, SHA256_OUT_LEN);
+
+    // Wipe key material + HMAC intermediates. crypto_wipe is volatile-
+    // safe; a plain memset here is allowed to be DCE'd because the
+    // buffers are never read again on this path.
+    crypto_wipe(k,           sizeof(k));
+    crypto_wipe(ipad,        sizeof(ipad));
+    crypto_wipe(opad,        sizeof(opad));
+    crypto_wipe(&inner,      sizeof(inner));
+    crypto_wipe(&outer,      sizeof(outer));
 }
 
 void hkdf_extract(const uint8_t *salt, size_t salt_len,
@@ -150,6 +162,11 @@ void hkdf_expand(const uint8_t *prk,  size_t prk_len,
         memcpy(okm + pos, t, take);
         pos += take;
     }
+    // T(n) is a keyed output of HMAC(prk, ...); `buf` holds the full
+    // T(n-1) || info || counter input. Both must be wiped before return
+    // so the optimizer can't omit it as an unused store.
+    crypto_wipe(t,   sizeof(t));
+    crypto_wipe(buf, sizeof(buf));
 }
 
 #endif  // PICOWALLET_TRUSTZONE && !PICOWALLET_SECURE_BUILD

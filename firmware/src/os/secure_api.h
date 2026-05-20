@@ -199,6 +199,11 @@ int s_hkdf_expand(const s_hkdf_expand_args_t *args);
 // truncated to uint8_t.
 uint32_t s_clock_get_hz(uint8_t clock_idx);
 
+// Note: an `s_status_str` veneer was sketched in PLAN.md §M9.2 for
+// turning error codes into strings on the NS side. It was never
+// implemented and has no callers; removed from the API surface to
+// keep the header honest.
+
 // --- Phase 7.2: PIN setup / unlock --------------------------------------
 //
 // PIN is collected on the Secure side via pin_ui (button input + e-paper
@@ -271,5 +276,3 @@ int s_slot_clear_override(uint8_t slot_idx);
 //   -101  invalid NS pointer (cmse range check failed)
 //   -102  PIN length out of range
 int s_seal_selftest(const uint8_t *pin, size_t pin_len);
-
-const char *s_status_str(int status);

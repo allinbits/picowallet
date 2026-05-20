@@ -1,4 +1,10 @@
-#if !PICOWALLET_TRUSTZONE || PICOWALLET_SECURE_BUILD
+// os_display_confirm is the multi-screen "<DENY ... ACCEPT>" confirm
+// dialog. Under TrustZone the only caller it ever had (factory_reset_confirm)
+// was rewritten in Phase 7.5 to a Secure-driven 3-second countdown
+// instead, so there is no Secure-side caller and the linker dead-stripped
+// it. Gate the body out of the Secure compile entirely -- the function
+// stays available for the pre-TZ single-image build that still uses it.
+#if !PICOWALLET_TRUSTZONE
 
 #include <stdio.h>
 #include <string.h>

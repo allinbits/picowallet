@@ -134,11 +134,12 @@ int s_flash_erase_hwm_all(void) {
 
 // --- Phase 2c: keystore-backed signing veneers -------------------------
 //
-// Walks an NS-supplied SLIP-10 path string through the Secure-side seed
-// (TEST_SEED, replaced by encrypted+PIN-unlocked seed in M9.5) and
-// returns the public key (s_get_pubkey) or a 32-byte SC-challenge
-// signature (s_sign_sc_challenge). Privval canonical sign-bytes routes
-// through the larger HWM-fused veneer (Phase 2c3).
+// Walks an NS-supplied SLIP-10 path string through the Secure-side
+// master seed (populated by m9_master_seed_set after a successful
+// s_pin_unlock or s_pin_setup) and returns either the public key
+// (s_get_pubkey) or a 32-byte SC-challenge signature
+// (s_sign_sc_challenge). Privval canonical sign-bytes routes through
+// the larger HWM-fused veneer (Phase 2c3).
 //
 // The path string is treated as length-bounded by KEYSTORE_MAX_PATH_LEN
 // scanning during cmse_check_address_range; we pass a generous upper
@@ -250,8 +251,8 @@ int s_sign_and_advance(const s_sign_and_advance_args_t *args) {
     // overrides the master.
     slot_seed_source_t src = m9_slot_seed_source(v.hwm_slot_idx);
     if (src == SLOT_SEED_SOURCE_DERIVED) {
-        // Default path: master mnemonic / TEST_SEED (until 7.6) +
-        // slot's BIP-44 path. Keeps every existing call site working.
+        // Default path: master mnemonic + slot's SLIP-10 derivation
+        // path. Keeps every existing call site working.
         return os_crypto_sign((os_curve_t)v.curve, v.path,
                               v.data, v.data_len, v.out_sig);
     }
