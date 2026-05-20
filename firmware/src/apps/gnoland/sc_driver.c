@@ -210,7 +210,14 @@ static int advance(gno_chain_t *c) {
                 goto emit_response;
             }
             // Strict chain_id binding: the slot is the ground truth.
-            size_t expected_len = strlen(c->slot->chain_id);
+            // Bounded scan (instead of strlen) -- if flash corruption or
+            // a NS-side bug strips the NUL, we'd otherwise run off the
+            // struct end into adjacent slot data or out of the CHAINS
+            // sector entirely. The cosmos privval path uses the same
+            // pattern in s_sign_and_advance.
+            size_t expected_len = 0;
+            while (expected_len < CHAINS_CHAIN_ID_MAX
+                   && c->slot->chain_id[expected_len] != '\0') expected_len++;
             if (chain_id_len != expected_len
                 || memcmp(chain_id, c->slot->chain_id, chain_id_len) != 0) {
                 char m[96];

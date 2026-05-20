@@ -69,6 +69,15 @@ static uint8_t s_argon2_work[M9_ARGON2_BLOCKS * 1024u];
 // burn until the layout is committed.
 static void derive_kek(const uint8_t *pin, size_t pin_len,
                        const uint8_t salt[16], uint8_t out_kek[32]) {
+    // Hard guard against caller-passed bogus pin_len. All sane callers
+    // already enforce M9_PIN_MIN_LEN..M9_PIN_MAX_LEN, but the OTP-bind
+    // path below memcpy's `pin_len` bytes into a fixed-size pass_buf;
+    // a too-large value would overflow Secure stack. Fail closed.
+    if (!pin || pin_len < M9_PIN_MIN_LEN || pin_len > M9_PIN_MAX_LEN) {
+        crypto_wipe(out_kek, 32);
+        return;
+    }
+
     crypto_argon2_config cfg = {
         .algorithm = CRYPTO_ARGON2_ID,
         .nb_blocks = M9_ARGON2_BLOCKS,

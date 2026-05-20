@@ -30,6 +30,20 @@
 // Set by os.refresh to request a clean (multi-pass) render at end of dispatch.
 static bool wanted_clean_refresh = false;
 
+// Strict integer parse for slot indices etc. atoi("abc") silently
+// returns 0, which would land slot commands on slot 0 instead of
+// rejecting. Require the whole string to be digits, no leading
+// whitespace, and value in [lo..hi]. Returns 0 on success.
+static int parse_int_range(const char *s, int lo, int hi, int *out) {
+    if (!s || !*s) return -1;
+    char *endp;
+    long val = strtol(s, &endp, 10);
+    if (endp == s || *endp != '\0')  return -1;   // not entirely numeric
+    if (val < (long)lo || val > (long)hi) return -1;
+    *out = (int)val;
+    return 0;
+}
+
 static int hex_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -497,8 +511,8 @@ static int dispatch_os(const char *cmd, const char *args,
 #if PICOWALLET_TRUSTZONE
     if (strcmp(cmd, "slot_mnemonic") == 0) {
         // os.slot_mnemonic <0..15>  -- Secure-side UI picks gen/restore
-        int slot_idx = atoi(args);
-        if (slot_idx < 0 || slot_idx > 15) {
+        int slot_idx;
+        if (parse_int_range(args, 0, 15, &slot_idx) != 0) {
             snprintf(reply, reply_size, "usage: os.slot_mnemonic <0..15>");
             return -1;
         }
@@ -519,12 +533,12 @@ static int dispatch_os(const char *cmd, const char *args,
             return -1;
         }
         *sp = '\0';
-        int slot_idx = atoi(buf);
-        const char *hex = sp + 1;
-        if (slot_idx < 0 || slot_idx > 15) {
+        int slot_idx;
+        if (parse_int_range(buf, 0, 15, &slot_idx) != 0) {
             snprintf(reply, reply_size, "slot out of range");
             return -1;
         }
+        const char *hex = sp + 1;
         if (strlen(hex) != 64) {
             snprintf(reply, reply_size, "expected 64 hex chars (32 bytes)");
             return -1;
@@ -544,8 +558,8 @@ static int dispatch_os(const char *cmd, const char *args,
         return rc == 0 ? 0 : -1;
     }
     if (strcmp(cmd, "slot_clear") == 0) {
-        int slot_idx = atoi(args);
-        if (slot_idx < 0 || slot_idx > 15) {
+        int slot_idx;
+        if (parse_int_range(args, 0, 15, &slot_idx) != 0) {
             snprintf(reply, reply_size, "usage: os.slot_clear <0..15>");
             return -1;
         }
@@ -584,8 +598,8 @@ static int dispatch_os(const char *cmd, const char *args,
     }
     if (strcmp(cmd, "slot_source") == 0) {
         // os.slot_source <0..15>
-        int slot_idx = atoi(args);
-        if (slot_idx < 0 || slot_idx > 15) {
+        int slot_idx;
+        if (parse_int_range(args, 0, 15, &slot_idx) != 0) {
             snprintf(reply, reply_size, "usage: os.slot_source <0..15>");
             return -1;
         }

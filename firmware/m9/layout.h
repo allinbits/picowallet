@@ -25,14 +25,23 @@
 #define M9_NSC_SIZE                0x00001000u   // 4 KB
 
 // Non-Secure image base. Boot ROM hands control here via BLXNS after
-// the Secure stub finishes its setup.
+// the Secure stub finishes its setup. The NS linker script
+// (memmap_nonsecure.ld) sets FLASH LENGTH to bound the NS image *just
+// below* the persistent regions: SLOT_SEEDS starts at 0x102EE000, so
+// the NS image gets ~2.4 MB of code budget.
 #define M9_NONSECURE_FLASH_BASE    0x10080000u
-#define M9_NONSECURE_FLASH_SIZE    0x0027F000u   // ~2.5 MB code budget
+#define M9_NONSECURE_FLASH_SIZE    0x0026E000u   // 0x10080000 .. 0x102EE000 (SLOT_SEEDS)
 
 // Persistent regions accessed memory-mapped by Non-Secure (reads) and
-// via the flash controller by Secure (writes). Offsets unchanged from
-// the pre-M9 firmware so existing chain config + HWM data survive the
-// transition.
+// via the flash controller by Secure (writes). Pre-M9 the firmware had
+// CHAINS + HWM only; M9.5 added SEED + SLOT_SEEDS. All four are
+// inside SAU R1 (NS XIP read), but only Secure can mutate them via
+// the s_flash_* veneers (or directly post-boot inside the Secure
+// stub's storage modules).
+#define M9_SLOT_SEEDS_FLASH_BASE   0x102EE000u
+#define M9_SLOT_SEEDS_FLASH_SIZE   0x00010000u   // 64 KB (16 slots * 4 KB)
+#define M9_SEED_FLASH_BASE         0x102FE000u
+#define M9_SEED_FLASH_SIZE         0x00001000u   // 4 KB
 #define M9_CHAINS_FLASH_BASE       0x102FF000u
 #define M9_CHAINS_FLASH_SIZE       0x00001000u   // 4 KB
 #define M9_HWM_FLASH_BASE          0x10300000u
