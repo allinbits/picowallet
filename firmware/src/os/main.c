@@ -227,6 +227,29 @@ int main(void) {
 
         factory_reset_check_trigger();
 
+        // Single-tap scroll. LEFT alone = scroll back, RIGHT alone =
+        // scroll forward. The factory-reset trigger requires BOTH
+        // held continuously for 5 s, so a brief single-button tap
+        // can't conflict. The state machine arms on all-released,
+        // fires once on the first sustained press of a single button,
+        // and disarms until both buttons are released again.
+        {
+            static bool tap_armed = true;
+            bool L = input_pressed(INPUT_BTN_LEFT);
+            bool R = input_pressed(INPUT_BTN_RIGHT);
+            if (!L && !R) {
+                tap_armed = true;
+            } else if (tap_armed && !(L && R)) {
+                tap_armed = false;
+                if (L) console_scroll_up();
+                else   console_scroll_down();
+                console_render();   // full LUT; ~1 s is fine for a scroll action
+            } else if (L && R) {
+                // Both pressed = factory-reset gesture; don't tap-scroll.
+                tap_armed = false;
+            }
+        }
+
         int n = usb_console_poll_line(line, sizeof(line));
         if (n >= 0) {
             host_protocol_dispatch(line);

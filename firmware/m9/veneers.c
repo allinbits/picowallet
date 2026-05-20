@@ -383,6 +383,16 @@ void s_console_render_clean(void) {
 }
 
 __attribute__((cmse_nonsecure_entry))
+void s_console_scroll_up(void) {
+    console_scroll_up();
+}
+
+__attribute__((cmse_nonsecure_entry))
+void s_console_scroll_down(void) {
+    console_scroll_down();
+}
+
+__attribute__((cmse_nonsecure_entry))
 uint8_t s_mode_select_prompt(void) {
     return (uint8_t)mode_select_prompt();
 }

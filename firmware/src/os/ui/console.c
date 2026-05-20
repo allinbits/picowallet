@@ -11,6 +11,8 @@ void console_clear_history(void)   { s_console_clear_history(); }
 void console_render(void)          { s_console_render(); }
 void console_render_clean(void)    { s_console_render_clean(); }
 bool console_is_dirty(void)        { return s_console_is_dirty(); }
+void console_scroll_up(void)       { s_console_scroll_up(); }
+void console_scroll_down(void)     { s_console_scroll_down(); }
 void console_log(const char *line) {
     if (!line) return;
     s_console_log(line, strlen(line) + 1);
@@ -27,21 +29,47 @@ void console_log(const char *line) {
 #include "GUI_Paint.h"
 #include "fonts.h"
 
-#define MAX_LINES    12
-#define MAX_LINE_LEN 40
+// History buffer holds 32 lines; the e-paper shows up to VISIBLE_LINES
+// at a time, anchored at `view_top`. New lines snap the view to the
+// bottom so fresh logs are always immediately visible; the operator
+// can scroll back with the console_scroll_* veneers.
+#define MAX_LINES      32
+#define MAX_LINE_LEN   40
+#define VISIBLE_LINES  10
 
 static char history[MAX_LINES][MAX_LINE_LEN + 1];
 static int  n_lines = 0;
+static int  view_top = 0;            // first history index rendered
 static volatile bool dirty = false;
 
 bool console_is_dirty(void) { return dirty; }
 
 void console_init(void) {
-    n_lines = 0;
+    n_lines  = 0;
+    view_top = 0;
 }
 
 void console_clear_history(void) {
-    n_lines = 0;
+    n_lines  = 0;
+    view_top = 0;
+}
+
+// Snap the view so the most-recent line is visible.
+static void view_snap_to_bottom(void) {
+    view_top = (n_lines > VISIBLE_LINES) ? (n_lines - VISIBLE_LINES) : 0;
+}
+
+void console_scroll_up(void) {
+    if (view_top == 0) return;
+    view_top--;
+    dirty = true;
+}
+
+void console_scroll_down(void) {
+    int max_top = (n_lines > VISIBLE_LINES) ? (n_lines - VISIBLE_LINES) : 0;
+    if (view_top >= max_top) return;
+    view_top++;
+    dirty = true;
 }
 
 static void push_one(const char *line) {
@@ -57,6 +85,10 @@ static void push_one(const char *line) {
         strncpy(history[MAX_LINES - 1], line, MAX_LINE_LEN);
         history[MAX_LINES - 1][MAX_LINE_LEN] = '\0';
     }
+    // New line arrived -- always snap so it's visible; this overrides
+    // any previous scroll-back position. Operators scrolling back to
+    // read history have to refrain from triggering more log lines.
+    view_snap_to_bottom();
 }
 
 void console_log(const char *line) {
@@ -100,9 +132,21 @@ static void paint_framebuffer(void) {
                    DOT_PIXEL_1X1, LINE_STYLE_SOLID);
 
     int y = 38;
-    for (int i = 0; i < n_lines; i++) {
+    int end = view_top + VISIBLE_LINES;
+    if (end > n_lines) end = n_lines;
+    for (int i = view_top; i < end; i++) {
         Paint_DrawString_EN(8, y, history[i], &Font16, WHITE, BLACK);
         y += 20;
+    }
+    // Scroll-position hint in the bottom-right if the buffer has more
+    // lines than fit on one screen.
+    if (n_lines > VISIBLE_LINES) {
+        char hint[24];
+        snprintf(hint, sizeof(hint), "%d-%d/%d",
+                 view_top + 1, end, n_lines);
+        int w = (int)strlen(hint) * 11;
+        Paint_DrawString_EN(DISPLAY_WIDTH - w - 8, DISPLAY_HEIGHT - 18,
+                            hint, &Font16, WHITE, BLACK);
     }
 }
 

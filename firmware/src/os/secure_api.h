@@ -143,6 +143,8 @@ void s_console_log(const char *line, size_t len);
 bool s_console_is_dirty(void);
 void s_console_render(void);        // fast refresh
 void s_console_render_clean(void);  // multi-pass clean refresh (removes ghosting)
+void s_console_scroll_up(void);     // step view toward older entries
+void s_console_scroll_down(void);   // step view toward newer entries
 
 // Show the mode-select prompt, block on a button press, return the
 // chosen mode (os_mode_t: 0 = TMKMS, 1 = PRIVVAL).
