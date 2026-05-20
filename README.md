@@ -159,6 +159,16 @@ On a freshly-flashed (or factory-wiped) device, the boot path is:
    scrolls up, BOTH commits the current selection. 4–8 digits.
    After DONE, the device asks for the PIN again (Confirm PIN). A
    mismatch loops back to Set PIN.
+
+   **Pick 8 digits.** The PIN is the only thing standing between an
+   attacker with a flash dump and the seed material; the KEK is
+   Argon2id(PIN, salt, OTP-secret-if-bound). A 4-digit numeric PIN
+   has 10⁴ candidates; at ~1 s per Argon2id attempt the offline brute
+   force completes in ~3 hours. 6 digits → ~3 months, 8 digits →
+   ~25 years. On-device the attempt counter wipes after 10 failures,
+   but that doesn't protect against extraction of the encrypted
+   blob. Higher entropy in the PIN is the only meaningful defense
+   below the M9.5 OTP-binding flag (which is off by default).
 3. **Setup mode chooser** — LEFT for RESTORE (type an existing
    24-word mnemonic), RIGHT for GENERATE (device makes a fresh one
    and shows it to you across 4 pages of 6 words; you MUST write

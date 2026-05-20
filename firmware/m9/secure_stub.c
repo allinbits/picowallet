@@ -43,6 +43,7 @@
 // veneer reads them when validating each privval sign request.
 #include "os/storage/chains.h"
 #include "os/storage/hwm_flash.h"
+#include "os/storage/seed_flash.h"   // m9_factory_wipe_resume_if_interrupted
 
 // ---- Phase 1c diagnostic LED blink ---------------------------------------
 //
@@ -412,6 +413,11 @@ static void m9_runtime_init_for_ns(void) {
 int main(void) {
     m9_runtime_init_for_ns();
     led_init();
+    // M9.5: complete any factory wipe that was interrupted mid-erase
+    // on the previous boot. Must run BEFORE chains_init / hwm_init so
+    // those caches load from the cleaned-up flash.
+    m9_factory_wipe_resume_if_interrupted();
+
     // Phase 2c3: prime the Secure-side chain config + HWM caches from
     // flash before BXNS so the s_sign_and_advance veneer can look up
     // the slot's chain_id and current HWM without NS being able to

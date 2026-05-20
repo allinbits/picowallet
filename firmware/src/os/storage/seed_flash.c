@@ -192,15 +192,24 @@ const m9_sealed_seed_t *m9_seed_flash_load(void) {
 }
 
 int m9_pin_attempts(void) {
+    // A counter page is "an attempt was recorded" if it has ANY byte
+    // that's not 0xFF -- i.e. the page is no longer pristine-erased.
+    // The previous semantics ("all zero == attempt") under-counted by
+    // one if a power loss interrupted a counter-page program: the
+    // partial page had a mix of 0x00 and 0xFF and so didn't satisfy
+    // all-zero, the scan terminated, and an attacker who could
+    // interrupt power could keep the counter pinned at N-1 across
+    // many guesses. With the "any non-0xFF" rule, a partial write
+    // counts immediately as a recorded attempt.
     int count = 0;
     for (int i = 1; i <= M9_PIN_MAX_ATTEMPTS; i++) {
         const uint8_t *page = SEED_FLASH_COUNTER_PAGE_PTR(i);
-        bool all_zero = true;
+        bool any_touched = false;
         for (size_t j = 0; j < SEED_PAGE_SIZE; j++) {
-            if (page[j] != 0x00) { all_zero = false; break; }
+            if (page[j] != 0xFF) { any_touched = true; break; }
         }
-        if (all_zero) count++;
-        else          break;     // pages must be contiguous; stop at first 0xFF
+        if (any_touched) count++;
+        else             break;     // first pristine page -- counter stops
     }
     return count;
 }
@@ -218,6 +227,10 @@ int m9_seed_flash_store(const m9_sealed_seed_t *blob) {
     flash_range_erase(SEED_FLASH_OFFSET, SEED_FLASH_SIZE);
     flash_range_program(SEED_FLASH_OFFSET, page, sizeof(page));
     restore_interrupts(ints);
+    // The blob is ciphertext + a public header, so leaking it on stack
+    // doesn't expose the seed; wipe anyway so the page buffer doesn't
+    // serve as a debugging breadcrumb for future maintainers.
+    crypto_wipe(page, sizeof(page));
     return 0;
 }
 
@@ -245,6 +258,7 @@ void m9_pin_attempt_reset(void) {
     flash_range_erase(SEED_FLASH_OFFSET, SEED_FLASH_SIZE);
     flash_range_program(SEED_FLASH_OFFSET, page, sizeof(page));
     restore_interrupts(ints);
+    crypto_wipe(page, sizeof(page));
 }
 
 // ----- PIN cache (Secure RAM) ----------------------------------------------
@@ -270,6 +284,40 @@ size_t m9_pin_cache_get(uint8_t out[M9_PIN_MAX_LEN]) {
 void m9_pin_cache_clear(void) {
     crypto_wipe(s_pin_cache, sizeof(s_pin_cache));
     s_pin_cache_len = 0;
+}
+
+// Scan a contiguous flash range for any non-0xFF byte. Returns true if
+// the region is entirely pristine (all 0xFF), false otherwise.
+static bool flash_region_is_blank(uint32_t offset, uint32_t size) {
+    const uint8_t *p = (const uint8_t *)(XIP_BASE + offset);
+    for (uint32_t i = 0; i < size; i++) {
+        if (p[i] != 0xFFu) return false;
+    }
+    return true;
+}
+
+void m9_factory_wipe_resume_if_interrupted(void) {
+    // If SEED is blank but any of the dependent regions are NOT blank,
+    // a previous factory_wipe_all was interrupted between the SEED
+    // erase and the rest. Finish the wipe so the device boots into a
+    // clean state. The SEED-first ordering means the partial state
+    // is signing-safe (no master seed means no DERIVED-path sign can
+    // succeed) but it can still confuse the operator who'd see stale
+    // chain config and HWM after they re-provision.
+    if (m9_seed_flash_is_initialized()) return;          // fully provisioned
+
+    bool slots_blank  = flash_region_is_blank(SLOT_SEEDS_FLASH_OFFSET,
+                                              SLOT_SEEDS_FLASH_SIZE);
+    bool chains_blank = flash_region_is_blank(CHAINS_FLASH_OFFSET,
+                                              CHAINS_FLASH_SIZE);
+    bool hwm_blank    = flash_region_is_blank(HWM_FLASH_OFFSET,
+                                              HWM_FLASH_SIZE);
+    if (slots_blank && chains_blank && hwm_blank) return; // fully wiped
+
+    // Interrupted wipe -- finish it.
+    if (!slots_blank)  m9_slot_seeds_wipe_all();
+    if (!chains_blank) chains_wipe();
+    if (!hwm_blank)    hwm_flash_wipe();
 }
 
 void m9_factory_wipe_all(void) {

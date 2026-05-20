@@ -416,6 +416,7 @@ void pin_ui_show_mnemonic(const uint16_t word_indices[24]) {
     // page confirms the operator has written it down. LEFT is ignored
     // (no "go back"; we don't want the operator skipping forward and
     // then accidentally backing out without seeing each page).
+    char line[24];
     for (int page = 0; page < 4; page++) {
         display_clear();
         Paint_DrawString_EN(8, 4, "PicoWallet", &Font20, WHITE, BLACK);
@@ -428,7 +429,6 @@ void pin_ui_show_mnemonic(const uint16_t word_indices[24]) {
 
         for (int i = 0; i < 6; i++) {
             int idx = page * 6 + i;
-            char line[24];
             snprintf(line, sizeof(line), "%2d. %s",
                      idx + 1, bip39_wordlist[word_indices[idx]]);
             Paint_DrawString_EN(8, 70 + i * 26, line, &Font20, WHITE, BLACK);
@@ -459,6 +459,12 @@ void pin_ui_show_mnemonic(const uint16_t word_indices[24]) {
             }
         }
     }
+    // Wipe the per-line scratch (defense in depth -- each line held a
+    // BIP-39 word from the mnemonic) AND immediately replace the
+    // on-screen content so the e-paper doesn't show page 4's six
+    // words for the ~3-second "Deriving seed..." gap.
+    crypto_wipe(line, sizeof(line));
+    pin_ui_show_status("Mnemonic confirmed");
 }
 
 int pin_ui_collect(const char *header, char *out_pin, size_t out_size) {

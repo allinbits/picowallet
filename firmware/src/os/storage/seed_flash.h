@@ -107,6 +107,13 @@ void m9_pin_attempt_reset(void);
 // from the factory-reset confirm flow.
 void m9_factory_wipe_all(void);
 
+// Boot-time recovery: if SEED is blank (no PIN configured) but any of
+// the other persistent regions are non-blank, treat it as an
+// interrupted factory wipe and complete it. Safe to call at every
+// boot -- no-op when the device is either fully provisioned or fully
+// wiped. Called from the Secure stub's main() before BXNS.
+void m9_factory_wipe_resume_if_interrupted(void);
+
 // ----- PIN cache (Secure RAM only) ----------------------------------------
 //
 // After s_pin_unlock succeeds, the PIN is stashed Secure-side so the
